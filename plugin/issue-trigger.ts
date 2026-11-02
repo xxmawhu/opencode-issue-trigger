@@ -1,0 +1,59 @@
+// OpenCode v1 plugin entry. Installed as ~/.config/opencode/plugin/issue-trigger.ts
+// Only plugin functions are exported: the v1 loader requires every export of a
+// legacy plugin module to be a plugin function.
+import { join } from "node:path";
+import { createIssueTrigger, createLogger } from "./issue-trigger-lib/index.mjs";
+
+function createPlugin(input) {
+  const directory = input?.directory || input?.worktree || process.cwd();
+  const client = input?.client;
+  const logger = createLogger();
+
+  if (!client?.session) {
+    logger.error("opencode session client is unavailable; issue-trigger disabled");
+    return {};
+  }
+
+  const trigger = createIssueTrigger({
+    issuesDir: join(directory, "issues"),
+    logger,
+    listSessions: async () => {
+      const result = await client.session.list({ query: { directory } });
+      if (Array.isArray(result)) return result;
+      if (Array.isArray(result?.data)) return result.data;
+      return [];
+    },
+    sendPrompt: async (sessionID, text) => {
+      const payload = {
+        path: { id: sessionID },
+        body: { parts: [{ type: "text", text }] },
+        query: { directory },
+      };
+      if (typeof client.session.promptAsync === "function") {
+        await client.session.promptAsync(payload);
+        return;
+      }
+      await client.session.prompt(payload);
+    },
+  });
+
+  trigger.start().catch((error) => {
+    logger.error("failed to start issue-trigger", { error: String(error) });
+  });
+
+  logger.info("issue-trigger loaded", { issuesDir: trigger.issuesDir });
+
+  return {
+    event: async ({ event }) => {
+      trigger.noteEvent(event);
+    },
+    dispose: async () => {
+      await trigger.stop();
+    },
+  };
+}
+
+// Default export is required by the v1 loader contract; named export keeps the
+// same function available to hosts that resolve by name.
+export const Plugin = createPlugin;
+export default createPlugin;

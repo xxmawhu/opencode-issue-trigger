@@ -1,0 +1,21 @@
+# 运行时目录（不入库）
+memory/*
+!memory/.gitkeep
+issues/*
+!issues/.gitkeep
+plan/*
+!plan/.gitkeep
+end_task/*
+!end_task/.gitkeep
+log/
+
+# 项目根 AGENTS.md 为软链接，不入库
+/AGENTS.md
+
+# 本地临时产物
+.var/
+*.tmp
+*.temp
+*.swp
+*.swo
+.DS_Store
