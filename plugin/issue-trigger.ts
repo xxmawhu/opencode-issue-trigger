@@ -7,7 +7,18 @@ import { createIssueTrigger, createLogger } from "./issue-trigger-lib/index.mjs"
 function createPlugin(input) {
   const directory = input?.directory || input?.worktree || process.cwd();
   const client = input?.client;
-  const logger = createLogger();
+  // Logging goes to opencode's own log sink; the plugin never owns a log file.
+  const logger = createLogger({
+    sink: (level, message, extra) =>
+      client?.app?.log?.({
+        body: {
+          service: "issue-trigger",
+          level,
+          message,
+          ...(extra === undefined ? {} : { extra }),
+        },
+      }),
+  });
 
   if (!client?.session) {
     logger.error("opencode session client is unavailable; issue-trigger disabled");

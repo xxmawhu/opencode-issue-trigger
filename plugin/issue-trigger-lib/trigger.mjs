@@ -4,7 +4,6 @@ import { basename } from "node:path";
 import { createInjector } from "./injector.mjs";
 import { createLogger } from "./logger.mjs";
 import { createSessionTracker } from "./session-tracker.mjs";
-import { createStateStore } from "./state.mjs";
 import { createIssueWatcher } from "./watcher.mjs";
 
 export const PROMPT_TEMPLATE = "请分析{issue-path}的内容，制定plan，写入到./plan并逐步实施";
@@ -15,7 +14,6 @@ export function buildIssuePrompt(issueName) {
 
 export function createIssueTrigger({
   issuesDir,
-  stateDir,
   logger,
   listSessions,
   sendPrompt,
@@ -38,19 +36,12 @@ export function createIssueTrigger({
     throw new TypeError("createIssueTrigger requires sendPrompt()");
   }
 
-  const log = logger || createLogger({ stateDir });
-  const state = createStateStore({ issuesDir, stateDir });
+  const log = logger || createLogger();
   const sessions = createSessionTracker({ listSessions, logger: log });
 
   const injector = createInjector({
     resolveSession: () => sessions.resolve(),
     sendPrompt,
-    onSuccess: (item) => {
-      if (!state.mark(item.path)) {
-        // [log-review] 预期内：状态目录不可写；降级原因：注入已完成；影响范围：重启后可能重复注入
-        log.warn("issue state write delayed; continuing", { path: item.path });
-      }
-    },
     onDrop: (path) => watcher.release(path),
     logger: log,
     maxAgeMs,
@@ -61,7 +52,6 @@ export function createIssueTrigger({
 
   const watcher = createIssueWatcher({
     issuesDir,
-    state,
     logger: log,
     quietMs,
     pollMs,

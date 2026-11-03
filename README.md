@@ -5,8 +5,8 @@
 ## 功能
 
 - `fs.watch` 实时监听 `./issues/`，每 30 秒低频扫描已落地的文件。
-- 每个 issue 文件只处理一次，状态持久化到 `~/.local/state/opencode-issue-trigger/`。
-- 自动跳过流程产物（`reply-*`、`reminder-*`、`backlog-*`、`stuck-*` 等）、ai-run-cmd 自反馈文件和终态 issue。
+- 每个 issue 文件在进程生命周期内只提醒一次；状态仅保存在内存，不落盘。重启后会对 `issues/` 现有文件重新提醒一次。
+- `issues/` 下所有 `.md` 文件都会处理，不做流程产物、自反馈或终态过滤；启动时立即扫描并注入。
 - 同时支持 opencode v1 与 v2 插件加载方式。
 - 注入词：
 
@@ -41,7 +41,7 @@ bash install.sh
 
 - 安装日志：`./log/install.YYYYMMDD.log`
 - pull 重装日志：`./log/post-merge-hook.YYYYMMDD.log`
-- 运行时日志：`~/.local/state/opencode-issue-trigger/issue-trigger.log`
+- 运行时日志：写入 opencode 自身日志（`service=issue-trigger`），插件不单独落盘。
 
 ## 目录结构
 

@@ -1,15 +1,15 @@
 // Watches <project>/issues with fs.watch plus a periodic polling fallback.
-// A file is ready when it is a regular non-empty actionable issue and its
-// signature has not changed for the quiet window.
+// Every regular .md file is an issue. Existing files are dispatched on startup;
+// files created later wait for the quiet window so writes can finish.
 import { readdirSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
-import { isActionableIssueFile, isIssueCandidateName } from "./system-file.mjs";
+import { isIssueFileName } from "./issue-file.mjs";
 
 function signatureOf(file) {
   try {
     const stat = statSync(file);
     if (!stat.isFile()) return undefined;
-    return { signature: `${stat.dev}:${stat.ino}:${stat.size}:${Math.trunc(stat.mtimeMs)}`, size: stat.size };
+    return { signature: `${stat.dev}:${stat.ino}:${stat.size}:${Math.trunc(stat.mtimeMs)}` };
   } catch {
     return undefined;
   }
@@ -22,7 +22,6 @@ function unref(timer) {
 
 export function createIssueWatcher({
   issuesDir,
-  state,
   logger,
   onReady,
   quietMs = 800,
@@ -47,11 +46,10 @@ export function createIssueWatcher({
     }
     const files = [];
     for (const entry of entries) {
-      if (!entry.isFile() || !isIssueCandidateName(entry.name)) continue;
+      if (!entry.isFile() || !isIssueFileName(entry.name)) continue;
       const path = join(issuesDir, entry.name);
       const info = signatureOf(path);
-      if (!info || info.size === 0) continue;
-      if (!isActionableIssueFile(issuesDir, entry.name)) continue;
+      if (!info) continue;
       files.push({ path, ...info });
     }
     return files;
@@ -71,7 +69,7 @@ export function createIssueWatcher({
 
   function dispatch(path) {
     candidates.delete(path);
-    if (state.has(path) || dispatched.has(path)) return;
+    if (dispatched.has(path)) return;
     dispatched.add(path);
     try {
       const result = onReady(path);
@@ -88,9 +86,9 @@ export function createIssueWatcher({
   }
 
   function schedule(path, info) {
-    if (state.has(path) || dispatched.has(path)) return;
+    if (dispatched.has(path)) return;
     cancel(path);
-    const candidate = { signature: info.signature, size: info.size, timer: undefined };
+    const candidate = { signature: info.signature, timer: undefined };
     candidates.set(path, candidate);
     candidate.timer = unref(
       setTimeoutFn(() => {
@@ -105,35 +103,34 @@ export function createIssueWatcher({
           schedule(path, latest);
           return;
         }
-        if (latest.size === 0) {
-          cancel(path);
-          return;
-        }
         dispatch(path);
       }, quietMs),
     );
   }
 
   function consider(name) {
-    if (!isIssueCandidateName(name)) return;
+    if (!isIssueFileName(name)) return;
     const path = join(issuesDir, name);
-    if (state.has(path) || dispatched.has(path)) return;
+    if (dispatched.has(path)) return;
     const info = signatureOf(path);
-    if (!info || info.size === 0) {
+    if (!info) {
       cancel(path);
       return;
     }
-    if (!isActionableIssueFile(issuesDir, name)) return;
     schedule(path, info);
   }
 
-  function scanNow() {
+  function scanNow({ immediate = false } = {}) {
     ensureWatch();
     const files = listFiles();
     for (const file of files) {
-      if (state.has(file.path) || dispatched.has(file.path)) continue;
+      if (dispatched.has(file.path)) continue;
       if (candidates.has(file.path)) continue;
-      schedule(file.path, file);
+      if (immediate) {
+        dispatch(file.path);
+      } else {
+        schedule(file.path, file);
+      }
     }
   }
 
@@ -177,11 +174,13 @@ export function createIssueWatcher({
     },
 
     async start() {
-      if (!state.load()) {
-        logger?.info("no prior state; scanning all actionable issues", { issuesDir });
-      }
-      scanNow();
-      pollTimer = unref(setIntervalFn(scanNow, pollMs));
+      // State is intentionally in-memory only: every startup re-reminds the
+      // user about issues already sitting on disk.
+      const files = listFiles();
+      ensureWatch();
+      for (const file of files) dispatch(file.path);
+      logger?.info("startup scan dispatched existing issues", { issuesDir, count: files.length });
+      pollTimer = unref(setIntervalFn(() => scanNow(), pollMs));
     },
 
     scanNow,

@@ -1,12 +1,8 @@
 # 运行时目录（不入库）
-memory/*
-!memory/.gitkeep
-issues/*
-!issues/.gitkeep
-plan/*
-!plan/.gitkeep
-end_task/*
-!end_task/.gitkeep
+memory/
+issues/
+plan/
+end_task/
 log/
 
 # 项目根 AGENTS.md 为软链接，不入库

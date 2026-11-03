@@ -111,6 +111,8 @@ install_hooks() {
 
 main() {
   log INFO "start" "开始安装 opencode-issue-trigger"
+  # Runtime directories are never committed; recreate them on install.
+  mkdir -p "${PROJECT_ROOT}/issues" "${PROJECT_ROOT}/plan" "${PROJECT_ROOT}/memory" "${PROJECT_ROOT}/end_task"
   install_plugin
   install_hooks
   log PASS "done" "安装完成"

@@ -7,7 +7,27 @@ import { createIssueTrigger, createLogger } from "./issue-trigger-lib/index.mjs"
 const issueTriggerPlugin = {
   id: "issue-trigger",
   async setup(ctx) {
-    const logger = createLogger();
+    // Logging goes to opencode's own log sink; the plugin never owns a log file.
+    const appLog = ctx?.app?.log ?? ctx?.client?.app?.log;
+    const appLogHost = ctx?.app?.log ? ctx.app : ctx?.client?.app;
+    const logger = createLogger({
+      sink: (level, message, extra) => {
+        if (typeof appLog === "function") {
+          return appLog.call(appLogHost, {
+            body: {
+              service: "issue-trigger",
+              level,
+              message,
+              ...(extra === undefined ? {} : { extra }),
+            },
+          });
+        }
+        // Fallback keeps records in opencode's own captured output when the
+        // host exposes no log API.
+        console.error(`[issue-trigger] ${level}: ${message}`, extra ?? "");
+        return undefined;
+      },
+    });
     const directory = ctx?.location?.directory || process.cwd();
     const controller = new AbortController();
 

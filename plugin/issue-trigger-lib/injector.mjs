@@ -6,7 +6,6 @@ const BUSY_RETRY_MS = [2000, 5000, 10000, 30000, 60000];
 export function createInjector({
   resolveSession,
   sendPrompt,
-  onSuccess,
   onDrop,
   logger,
   maxAgeMs = DEFAULT_MAX_AGE_MS,
@@ -105,13 +104,6 @@ export function createInjector({
           sessionID,
           attempts: item.attempts + 1,
         });
-        try {
-          const result = onSuccess?.(item);
-          if (result && typeof result.then === "function") await result;
-        } catch (error) {
-          // [log-review] 预期内：状态目录不可写；降级原因：仅影响去重记忆，注入已完成；影响范围：重启后可能重复注入
-          logger?.warn("issue state write delayed; continuing", { path: item.path, error: String(error) });
-        }
       }
     } finally {
       flushing = false;
