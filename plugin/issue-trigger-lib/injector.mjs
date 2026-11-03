@@ -73,7 +73,7 @@ export function createInjector({
         if (!sessionID) {
           item.attempts += 1;
           if (item.attempts === 1 || item.attempts % 12 === 0) {
-            logger?.info("no active session yet; issue stays queued", {
+            logger?.info("no injectable session yet; issue stays queued", {
               path: item.path,
               attempts: item.attempts,
             });

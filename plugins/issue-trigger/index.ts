@@ -33,6 +33,7 @@ const issueTriggerPlugin = {
 
     const trigger = createIssueTrigger({
       issuesDir: join(directory, "issues"),
+      directory,
       logger,
       listSessions: async () => {
         if (typeof ctx?.session?.list !== "function") return [];

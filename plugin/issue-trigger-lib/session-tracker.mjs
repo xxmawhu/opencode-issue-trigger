@@ -1,4 +1,13 @@
-// Resolves the most recently active root session for prompt injection.
+// Resolves the session that should receive an issue reminder.
+//
+// Selection policy, in order:
+//   1. the same-directory root session the user most recently wrote to
+//      (assistant streaming events are ignored so the target does not drift)
+//   2. a same-directory root session that is currently idle
+//   3. the most recently updated same-directory root session (startup fallback)
+//
+// A session reported busy by `session.status` is never injected into; the
+// reminder waits for `session.idle` instead of interrupting the active turn.
 function toMillis(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value < 1e12 ? value * 1000 : value;
@@ -24,6 +33,11 @@ function isRoot(session) {
   return session && !session.parentID && !session.parentId;
 }
 
+function isUserMessage(event) {
+  if (event?.type !== "message.updated") return false;
+  return event.properties?.info?.role === "user";
+}
+
 export function extractSessionID(event) {
   if (!event || typeof event !== "object") return undefined;
   const candidates = [
@@ -39,12 +53,24 @@ export function extractSessionID(event) {
   return candidates.find((value) => typeof value === "string" && value.length > 0);
 }
 
-export function createSessionTracker({ listSessions, logger } = {}) {
+export function createSessionTracker({ listSessions, directory, logger } = {}) {
   let lastSessionID;
+  const busy = new Set();
 
   function noteEvent(event) {
     const sessionID = extractSessionID(event);
-    if (sessionID) lastSessionID = sessionID;
+    if (!sessionID) return;
+    if (event?.type === "session.status") {
+      // retry counts as busy: the session is still working on a turn.
+      if (event.properties?.status?.type === "idle") busy.delete(sessionID);
+      else busy.add(sessionID);
+      return;
+    }
+    if (event?.type === "session.idle") {
+      busy.delete(sessionID);
+      return;
+    }
+    if (isUserMessage(event)) lastSessionID = sessionID;
   }
 
   async function resolve() {
@@ -57,13 +83,17 @@ export function createSessionTracker({ listSessions, logger } = {}) {
       return undefined;
     }
     if (!Array.isArray(sessions)) return undefined;
-    const roots = sessions.filter(isRoot).slice().sort((a, b) => updatedAt(b) - updatedAt(a));
+    const roots = sessions
+      .filter(isRoot)
+      .filter((session) => !directory || !session.directory || session.directory === directory)
+      .slice()
+      .sort((a, b) => updatedAt(b) - updatedAt(a));
     if (roots.length === 0) return undefined;
-    if (lastSessionID) {
-      const tracked = roots.find((session) => session.id === lastSessionID);
-      if (tracked) return tracked.id;
-    }
-    return roots[0].id;
+
+    const tracked = lastSessionID ? roots.find((session) => session.id === lastSessionID) : undefined;
+    const target = tracked || roots.find((session) => !busy.has(session.id)) || roots[0];
+    if (busy.has(target.id)) return undefined;
+    return target.id;
   }
 
   return {

@@ -27,6 +27,7 @@ function createPlugin(input) {
 
   const trigger = createIssueTrigger({
     issuesDir: join(directory, "issues"),
+    directory,
     logger,
     listSessions: async () => {
       const result = await client.session.list({ query: { directory } });

@@ -14,6 +14,7 @@ export function buildIssuePrompt(issueName) {
 
 export function createIssueTrigger({
   issuesDir,
+  directory,
   logger,
   listSessions,
   sendPrompt,
@@ -37,7 +38,7 @@ export function createIssueTrigger({
   }
 
   const log = logger || createLogger();
-  const sessions = createSessionTracker({ listSessions, logger: log });
+  const sessions = createSessionTracker({ listSessions, directory, logger: log });
 
   const injector = createInjector({
     resolveSession: () => sessions.resolve(),
@@ -68,7 +69,11 @@ export function createIssueTrigger({
 
   return {
     issuesDir,
-    noteEvent: (event) => sessions.noteEvent(event),
+    noteEvent: (event) => {
+      sessions.noteEvent(event);
+      const idle = event?.type === "session.idle" || (event?.type === "session.status" && event.properties?.status?.type === "idle");
+      if (idle) void injector.flush();
+    },
     async start() {
       if (started) return;
       started = true;
