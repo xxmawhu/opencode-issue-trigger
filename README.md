@@ -19,7 +19,7 @@
 ## 本地安装流程
 
 ```bash
-git clone git@github.com:xxmawhu/opencode-issue-trigger.git
+git clone https://github.com/xxmawhu/opencode-issue-trigger.git
 cd opencode-issue-trigger
 bash install.sh
 ```
@@ -36,20 +36,3 @@ bash install.sh
 ## 自动更新
 
 仓库已配置 `.pre-commit-config.yaml`。`git pull` 触发 `post-merge` hook，自动执行 `install.sh`，把最新插件文件重新安装到 opencode 配置目录。
-
-## 日志
-
-- 安装日志：`./log/install.YYYYMMDD.log`
-- pull 重装日志：`./log/post-merge-hook.YYYYMMDD.log`
-- 运行时日志：写入 opencode 自身日志（`service=issue-trigger`），插件不单独落盘。
-
-## 目录结构
-
-```text
-plugin/issue-trigger.ts                  # opencode v1 入口
-plugin/issue-trigger-lib/                # 共享实现
-plugins/issue-trigger/index.ts           # opencode v2 入口
-scripts/post-merge-hook.sh               # git pull 后自动重装
-install.sh                               # 一键安装
-.pre-commit-config.yaml                  # pre-commit / post-merge hooks
-```
