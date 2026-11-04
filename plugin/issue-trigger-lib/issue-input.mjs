@@ -112,7 +112,7 @@ export function createIssueInputHandler({
 
     const body = parseIssueCommand(trimmed);
     if (!body) {
-      // WARN: recoverable malformed input; the user is told nothing else.
+      // [log-review] 预期内：用户输入格式不完整；降级原因：不创建 issue 即满足语义；影响范围：单条消息被忽略
       logger?.warn("issue command has an empty body; ignored", { messageID });
       return { created: false, reason: "empty-body" };
     }
@@ -125,8 +125,7 @@ export function createIssueInputHandler({
       isDirectory = false;
     }
     if (!isDirectory) {
-      // WARN: recoverable, the project may not manage issues; never create the
-      // directory on the user's behalf.
+      // [log-review] 预期内：项目未启用 issues；降级原因：不擅自创建目录，命令忽略即可；影响范围：单条消息被忽略
       logger?.warn("issues directory is missing; issue command ignored", { issuesDir });
       return { created: false, reason: "no-issues-dir" };
     }
