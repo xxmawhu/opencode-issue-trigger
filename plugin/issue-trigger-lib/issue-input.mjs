@@ -3,16 +3,19 @@
 //
 // Message filters are intentionally narrow:
 //   - synthetic parts are host-generated, never user input
-//   - the ulw-pm host agent injects prompts of its own
-//   - our own reminder text starts with INJECTED_PROMPT_PREFIX
-// Without these filters the injection itself or an orchestrator prompt could
-// create a new issue and retrigger injection indefinitely.
+//   - plugin reminder text starts with one of INJECTED_PROMPT_PREFIXES
+//
+// The active agent name is NOT usable as a filter. A host may run every session
+// under a non-default agent (for example `ulw-pm`); plugin prompt injections and
+// real user input then carry the same agent name, so filtering on it drops the
+// user's own messages. Prompt text is the reliable discriminator: our own
+// reminder wording never starts with `issue`, so it cannot retrigger creation.
 import { existsSync, linkSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const ISSUE_COMMAND_PATTERN = /^issue\b[:：]?\s*([\s\S]+)$/i;
 export const INJECTED_PROMPT_PREFIX = "请分析./issues/";
-export const HOST_INJECTION_AGENTS = ["ulw-pm"];
+export const INJECTED_PROMPT_PREFIXES = [INJECTED_PROMPT_PREFIX, "请严格遵守./plan/"];
 
 // Returns the issue body when the message starts with the command word
 // `issue`, otherwise undefined. Leading blank lines are ignored so the command
@@ -98,13 +101,12 @@ export function createIssueInputHandler({
     return true;
   }
 
-  function handle({ text, messageID, agent, synthetic } = {}) {
+  function handle({ text, messageID, synthetic } = {}) {
     if (synthetic === true) return { created: false, reason: "synthetic" };
-    if (HOST_INJECTION_AGENTS.includes(agent)) return { created: false, reason: "host-agent" };
     if (typeof text !== "string") return { created: false, reason: "no-text" };
 
     const trimmed = text.trimStart();
-    if (trimmed.startsWith(INJECTED_PROMPT_PREFIX)) {
+    if (INJECTED_PROMPT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
       return { created: false, reason: "injected-prompt" };
     }
 

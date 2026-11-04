@@ -66,10 +66,12 @@ function createPlugin(input) {
         const parts = Array.isArray(output?.parts) ? output.parts : [];
         for (const part of parts) {
           if (part?.type !== "text" || typeof part.text !== "string") continue;
+          // Do not pass the active agent: hosts may run every session under
+          // `ulw-pm`, which would make user input indistinguishable from host
+          // injections. Only the message text identifies our own prompts.
           const result = inputHandler.handle({
             text: part.text,
             messageID: input?.messageID,
-            agent: input?.agent,
             synthetic: part.synthetic === true,
           });
           if (result.created) break;

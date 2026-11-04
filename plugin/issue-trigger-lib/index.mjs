@@ -12,5 +12,5 @@ export {
   formatTimestamp,
   ISSUE_COMMAND_PATTERN,
   INJECTED_PROMPT_PREFIX,
-  HOST_INJECTION_AGENTS,
+  INJECTED_PROMPT_PREFIXES,
 } from "./issue-input.mjs";
