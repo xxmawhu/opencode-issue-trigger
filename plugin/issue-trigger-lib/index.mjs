@@ -5,3 +5,12 @@ export { createInjector } from "./injector.mjs";
 export { createSessionTracker } from "./session-tracker.mjs";
 export { createLogger } from "./logger.mjs";
 export { isIssueFileName } from "./issue-file.mjs";
+export {
+  createIssueInputHandler,
+  parseIssueCommand,
+  matchesIssueCommand,
+  formatTimestamp,
+  ISSUE_COMMAND_PATTERN,
+  INJECTED_PROMPT_PREFIX,
+  HOST_INJECTION_AGENTS,
+} from "./issue-input.mjs";

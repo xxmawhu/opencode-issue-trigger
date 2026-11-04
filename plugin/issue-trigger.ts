@@ -2,7 +2,7 @@
 // Only plugin functions are exported: the v1 loader requires every export of a
 // legacy plugin module to be a plugin function.
 import { join } from "node:path";
-import { createIssueTrigger, createLogger } from "./issue-trigger-lib/index.mjs";
+import { createIssueInputHandler, createIssueTrigger, createLogger } from "./issue-trigger-lib/index.mjs";
 
 function createPlugin(input) {
   const directory = input?.directory || input?.worktree || process.cwd();
@@ -25,8 +25,11 @@ function createPlugin(input) {
     return {};
   }
 
+  const issuesDir = join(directory, "issues");
+  const inputHandler = createIssueInputHandler({ issuesDir, logger });
+
   const trigger = createIssueTrigger({
-    issuesDir: join(directory, "issues"),
+    issuesDir,
     directory,
     logger,
     listSessions: async () => {
@@ -56,6 +59,26 @@ function createPlugin(input) {
   logger.info("issue-trigger loaded", { issuesDir: trigger.issuesDir });
 
   return {
+    // v1 hook for user input. The host calls it for user messages; parts that
+    // the host synthesized are ignored so only what the user typed is parsed.
+    "chat.message": async (input, output) => {
+      try {
+        const parts = Array.isArray(output?.parts) ? output.parts : [];
+        for (const part of parts) {
+          if (part?.type !== "text" || typeof part.text !== "string") continue;
+          const result = inputHandler.handle({
+            text: part.text,
+            messageID: input?.messageID,
+            agent: input?.agent,
+            synthetic: part.synthetic === true,
+          });
+          if (result.created) break;
+        }
+      } catch (error) {
+        // A parsing failure must never break the user's message.
+        logger.error("failed to handle user input", { error: String(error) });
+      }
+    },
     event: async ({ event }) => {
       trigger.noteEvent(event);
     },

@@ -16,6 +16,35 @@
 
 - 无运行时依赖，只用 Node/Bun 内置模块。
 
+## 从用户输入创建 issue
+
+在会话中发送以 `issue` 开头的消息，插件会把它写成 `issues/` 下的新文件，随后按正常监听链路注入处理提示词。
+
+```text
+issue 记录：编译时缺少 zstd 头文件
+```
+
+行为约定：
+
+- 只解析消息首个非空行；`issue` 后可跟空格或冒号，其余内容为正文。
+- 正文为空时不创建文件，只记录一条 warn 日志。
+- 文件名为 `<YYYYMMDD_HHMMSS>_<slug>.md`：slug 取正文首行前 24 个字符，非 `[A-Za-z0-9_-]` 折叠为 `-`；同秒同名追加 `_2`、`_3`。
+- 先写 `issues/.<name>.md.tmp-<pid>` 再 `rename` 原子发布；临时文件不以 `.md` 结尾，监听器不会拾到半成品。
+- `issues/` 不存在时只记录 warn，不自动创建目录。
+- 写入失败只记录 error，不影响用户消息本身。
+- 同一 `messageID` 只处理一次，防止流式重试重复创建。
+
+消息过滤：
+
+- 宿主生成的合成消息（part 带 `synthetic`）不处理。
+- `ulw-pm` agent 的宿主注入不处理。
+- 以注入词 `请分析./issues/` 开头的文本不处理；注入词本身不以 `issue` 开头，因此不会自激。
+
+实现路径：
+
+- v1：注册 `chat.message` hook，读取 `output.parts` 中的文本片段。
+- v2：注册 `ctx.session.hook("prompt", ...)`（官方迁移表对应 `chat.message`）。旧宿主没有该 hook 时，退化为订阅 `message.updated` / `message.part.updated`，等 `session.idle` 后用完整文本处理。
+
 ## 注入会话的选择
 
 服务端插件拿不到 TUI 当前显示的会话：官方插件 API 只有 `client` 与事件流，事件列表中没有会话焦点/切换事件，`tui.*` 也只是推送类端点。因此按「工作正在发生的会话」推断，优先级如下：
