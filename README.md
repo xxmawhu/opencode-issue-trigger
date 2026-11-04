@@ -26,7 +26,8 @@ issue 记录：编译时缺少 zstd 头文件
 
 行为约定：
 
-- 只解析消息首个非空行；`issue` 后可跟空格或冒号，其余内容为正文。
+- 以首个非空行判断是否为命令；`issue` 后可跟空格或冒号，正文保留全部行。
+- 宿主把 prompt 作为 JSON 字符串传入时（例如 `opencode run`），外层成对的单/双引号会先剥离再解析。
 - 正文为空时不创建文件，只记录一条 warn 日志。
 - 文件名为 `<YYYYMMDD_HHMMSS>_<slug>.md`：slug 取正文首行前 24 个字符，非 `[A-Za-z0-9_-]` 折叠为 `-`；同秒同名追加 `_2`、`_3`。
 - 先写 `issues/.<name>.md.tmp-<pid>`，再用硬链接原子发布；临时文件不以 `.md` 结尾，监听器不会拾到半成品，同名时追加 `_2` 而不覆盖。
@@ -43,7 +44,7 @@ issue 记录：编译时缺少 zstd 头文件
 实现路径：
 
 - v1：注册 `chat.message` hook，读取 `output.parts` 中的文本片段。
-- v2：注册 `ctx.session.hook("prompt", ...)`（官方迁移表对应 `chat.message`）。旧宿主没有该 hook 时，退化为订阅 `message.updated` / `message.part.updated`，等 `session.idle` 后用完整文本处理。
+- v2：导出插件函数并返回 hooks 对象，注册 `chat.message`（读取 `output.parts`）、`event`（喂给会话跟踪器）与 `dispose`。不使用 `ctx.session.hook`：当前宿主（1.18.x）没有该 API，静默跳过会得到空 hooks，用户输入不会被识别。
 
 ## 注入会话的选择
 

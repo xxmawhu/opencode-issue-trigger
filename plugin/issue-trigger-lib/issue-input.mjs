@@ -17,12 +17,26 @@ export const ISSUE_COMMAND_PATTERN = /^issue\b[:：]?\s*([\s\S]+)$/i;
 export const INJECTED_PROMPT_PREFIX = "请分析./issues/";
 export const INJECTED_PROMPT_PREFIXES = [INJECTED_PROMPT_PREFIX, "请严格遵守./plan/"];
 
+// Some hosts (notably `opencode run`) pass the prompt as a JSON-encoded
+// string, so the text arrives wrapped in a matching pair of double quotes.
+// Treat that as presentation, not part of the user's command.
+function unwrapQuotes(text) {
+  const trimmed = text.replace(/^\s+/, "");
+  if (trimmed.length < 2) return trimmed;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 // Returns the issue body when the message starts with the command word
 // `issue`, otherwise undefined. Leading blank lines are ignored so the command
 // may start at the first non-empty line.
 export function parseIssueCommand(text) {
   if (typeof text !== "string") return undefined;
-  const normalized = text.replace(/^\s+/, "");
+  const normalized = unwrapQuotes(text);
   const match = ISSUE_COMMAND_PATTERN.exec(normalized);
   if (!match) return undefined;
   const body = match[1].trim();
@@ -32,7 +46,7 @@ export function parseIssueCommand(text) {
 // True when the message is an issue command even if its body is empty.
 export function matchesIssueCommand(text) {
   if (typeof text !== "string") return false;
-  return /^issue\b[:：]?/i.test(text.replace(/^\s+/, ""));
+  return /^issue\b[:：]?/i.test(unwrapQuotes(text));
 }
 
 function slugify(body) {

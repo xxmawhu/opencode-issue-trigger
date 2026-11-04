@@ -6,7 +6,7 @@ end_task/
 log/
 data/
 
-# 项目根 AGENTS.md 为软链接，不入库
+# 项目根禁止 AGENTS.md（任意形态），不入库
 /AGENTS.md
 
 # 本地临时产物
