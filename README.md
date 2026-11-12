@@ -43,8 +43,9 @@ issue 记录：编译时缺少 zstd 头文件
 
 实现路径：
 
-- v1：注册 `chat.message` hook，读取 `output.parts` 中的文本片段。
-- v2：导出插件函数并返回 hooks 对象，注册 `chat.message`（读取 `output.parts`）、`event`（喂给会话跟踪器）与 `dispose`。不使用 `ctx.session.hook`：当前宿主（1.18.x）没有该 API，静默跳过会得到空 hooks，用户输入不会被识别。
+- v1：宿主调用 `server()`，注册 `chat.message` hook，读取 `output.parts` 中的文本片段。
+- v2：宿主调用 `setup(ctx)`。用户输入没有 `chat.message` 等价 hook，改用 `session.hook("context")` 读取每次模型调用前的消息列表；同一 `messageID` 只处理一次。监听注入链路使用 `ctx.session.list/prompt` 与 `ctx.event.subscribe`。
+- 共享库安装在 `~/.config/opencode/issue-trigger-lib`，不放在 `plugin/` 或 `plugins/` 下：两代宿主都会把这两个目录的子目录当作独立插件加载。
 
 ## 注入会话的选择
 
@@ -75,9 +76,9 @@ bash install.sh
 
 `install.sh` 会：
 
-1. 把 v1 入口安装到 `~/.config/opencode/plugin/issue-trigger.ts`。
-2. 把 v2 入口安装到 `~/.config/opencode/plugins/issue-trigger/index.ts`。
-3. 把共享库安装到上述两个入口旁边。
+1. 把插件入口安装到 `~/.config/opencode/plugin/issue-trigger.ts`，同一文件内的 `server()` 与 `setup()` 分别服务 v1 与 v2。
+2. 把共享库安装到 `~/.config/opencode/issue-trigger-lib`。
+3. 删除旧布局（`plugin/issue-trigger-lib`、`plugins/issue-trigger`），避免重复加载与加载失败。
 4. 用 `pre-commit` 注册 `pre-commit` 与 `post-merge` git hooks。
 
 安装完成后重启 opencode 即可生效。

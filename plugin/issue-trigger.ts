@@ -1,10 +1,91 @@
-// OpenCode v1 plugin entry. Installed as ~/.config/opencode/plugin/issue-trigger.ts
-// Only plugin functions are exported: the v1 loader requires every export of a
-// legacy plugin module to be a plugin function.
+// OpenCode plugin entry, installed as ~/.config/opencode/plugin/issue-trigger.ts.
+//
+// Two host generations load this file:
+//   - opencode 1.x calls `server(input)` and uses the returned hook table.
+//   - opencode 2.x calls `setup(ctx)`; ctx is the client API and the value the
+//     function returns is the dispose callback.
+// Both hosts treat every subdirectory of plugin/ and plugins/ as a plugin
+// package, so the shared library lives one level up in ../issue-trigger-lib.
 import { join } from "node:path";
-import { createIssueInputHandler, createIssueTrigger, createLogger } from "./issue-trigger-lib/index.mjs";
+import { createIssueInputHandler, createIssueTrigger, createLogger } from "../issue-trigger-lib/index.mjs";
 
-function createPlugin(input) {
+function createRuntime({ directory, logger, listSessions, sendPrompt }) {
+  const issuesDir = join(directory, "issues");
+  const inputHandler = createIssueInputHandler({ issuesDir, logger });
+  const trigger = createIssueTrigger({ issuesDir, directory, logger, listSessions, sendPrompt });
+  return { trigger, inputHandler };
+}
+
+// Feeds the text parts of one user message to the issue command parser. The
+// active agent name is intentionally not used: hosts may run every session
+// under the same agent (for example `ulw-pm`), so it cannot distinguish user
+// input from plugin injections. Only synthetic parts and our own reminder
+// prefixes are filtered.
+function handleParts({ inputHandler, logger, parts, messageID }) {
+  try {
+    for (const part of Array.isArray(parts) ? parts : []) {
+      if (part?.type !== "text" || typeof part.text !== "string") continue;
+      const result = inputHandler.handle({
+        text: part.text,
+        messageID,
+        synthetic: part.synthetic === true,
+      });
+      if (result.created) break;
+    }
+  } catch (error) {
+    // A parsing failure must never break the user's message.
+    logger.error("failed to handle user input", { error: String(error) });
+  }
+}
+
+function messageParts(message, info) {
+  if (Array.isArray(message?.parts)) return message.parts;
+  if (Array.isArray(message?.content)) return message.content;
+  if (Array.isArray(info?.parts)) return info.parts;
+  return [];
+}
+
+// opencode 2.x has no chat.message hook. The `context` session hook receives
+// the message list before each model call, which is the only place a user
+// prompt becomes visible to a plugin, so the issue command is admitted there.
+function userTexts(message) {
+  const info = message?.info ?? message;
+  if (info?.role !== "user") return undefined;
+  const messageID = info?.id ?? message?.id ?? info?.messageID;
+  const texts = [];
+  for (const part of messageParts(message, info)) {
+    if (part?.synthetic === true) continue;
+    if (part?.type !== "text" || typeof part.text !== "string") continue;
+    texts.push(part.text);
+  }
+  if (typeof info?.text === "string") texts.push(info.text);
+  return { messageID, texts };
+}
+
+function createContextHook(inputHandler, logger) {
+  return (event) => {
+    try {
+      const messages = Array.isArray(event?.messages) ? event.messages : [];
+      for (const message of messages) {
+        const entry = userTexts(message);
+        if (!entry) continue;
+        for (const text of entry.texts) {
+          const result = inputHandler.handle({
+            text,
+            messageID: entry.messageID,
+            synthetic: false,
+          });
+          if (result.created) break;
+        }
+      }
+    } catch (error) {
+      logger.error("failed to inspect session messages", { error: String(error) });
+    }
+    return event;
+  };
+}
+
+async function server(input) {
   const directory = input?.directory || input?.worktree || process.cwd();
   const client = input?.client;
   // Logging goes to opencode's own log sink; the plugin never owns a log file.
@@ -25,11 +106,7 @@ function createPlugin(input) {
     return {};
   }
 
-  const issuesDir = join(directory, "issues");
-  const inputHandler = createIssueInputHandler({ issuesDir, logger });
-
-  const trigger = createIssueTrigger({
-    issuesDir,
+  const { trigger, inputHandler } = createRuntime({
     directory,
     logger,
     listSessions: async () => {
@@ -59,27 +136,10 @@ function createPlugin(input) {
   logger.info("issue-trigger loaded", { issuesDir: trigger.issuesDir });
 
   return {
-    // v1 hook for user input. The host calls it for user messages; parts that
-    // the host synthesized are ignored so only what the user typed is parsed.
+    // v1 hook for user input. Read only the parts the user typed; host
+    // synthesized parts are ignored.
     "chat.message": async (input, output) => {
-      try {
-        const parts = Array.isArray(output?.parts) ? output.parts : [];
-        for (const part of parts) {
-          if (part?.type !== "text" || typeof part.text !== "string") continue;
-          // Do not pass the active agent: hosts may run every session under
-          // `ulw-pm`, which would make user input indistinguishable from host
-          // injections. Only the message text identifies our own prompts.
-          const result = inputHandler.handle({
-            text: part.text,
-            messageID: input?.messageID,
-            synthetic: part.synthetic === true,
-          });
-          if (result.created) break;
-        }
-      } catch (error) {
-        // A parsing failure must never break the user's message.
-        logger.error("failed to handle user input", { error: String(error) });
-      }
+      handleParts({ inputHandler, logger, parts: output?.parts, messageID: input?.messageID });
     },
     event: async ({ event }) => {
       trigger.noteEvent(event);
@@ -90,7 +150,84 @@ function createPlugin(input) {
   };
 }
 
-// Default export is required by the v1 loader contract; named export keeps the
-// same function available to hosts that resolve by name.
-export const Plugin = createPlugin;
-export default createPlugin;
+async function setup(ctx) {
+  const directory = ctx?.location?.directory || ctx?.directory || process.cwd();
+  // opencode 2.x exposes no app.log endpoint; stderr is captured by the host
+  // log (verified: --print-logs records console.error).
+  const logger = createLogger({
+    sink: (level, message, extra) => {
+      const suffix = extra === undefined ? "" : ` ${JSON.stringify(extra)}`;
+      console.error(`[issue-trigger] ${level} ${message}${suffix}`);
+    },
+  });
+
+  if (typeof ctx?.session?.prompt !== "function") {
+    logger.error("opencode session client is unavailable; issue-trigger disabled");
+    return undefined;
+  }
+
+  const { trigger, inputHandler } = createRuntime({
+    directory,
+    logger,
+    listSessions: async () => {
+      if (typeof ctx?.session?.list !== "function") return [];
+      const page = await ctx.session.list({ directory, limit: 50 });
+      if (Array.isArray(page)) return page;
+      if (Array.isArray(page?.data)) return page.data;
+      if (Array.isArray(page?.items)) return page.items;
+      return [];
+    },
+    sendPrompt: async (sessionID, text) => {
+      await ctx.session.prompt({ sessionID, text });
+    },
+  });
+
+  await trigger.start();
+  logger.info("issue-trigger loaded", { issuesDir: trigger.issuesDir });
+
+  const controller = new AbortController();
+  const events =
+    typeof ctx?.event?.subscribe === "function"
+      ? ctx.event.subscribe({ signal: controller.signal })
+      : undefined;
+  if (events) {
+    void (async () => {
+      try {
+        for await (const event of events) trigger.noteEvent(event);
+      } catch (error) {
+        // [log-review] 预期内：插件卸载或连接重建；降级原因：注入不依赖该事件流；影响范围：会话跟踪退化为最近会话
+        if (!controller.signal.aborted) logger.warn("event stream ended", { error: String(error) });
+      }
+    })();
+  }
+
+  let contextHook;
+  if (typeof ctx?.session?.hook === "function") {
+    try {
+      contextHook = await ctx.session.hook("context", createContextHook(inputHandler, logger));
+    } catch (error) {
+      logger.error("failed to register session context hook", { error: String(error) });
+    }
+  } else {
+    // [log-review] 预期内：宿主未暴露 session.hook；降级原因：监听注入仍可用；影响范围：用户输入创建 issue 不可用
+    logger.warn("host exposes no session.hook; user input issue creation disabled");
+  }
+
+  return async () => {
+    controller.abort();
+    try {
+      contextHook?.dispose?.();
+    } catch {
+      // Ignore dispose failures during shutdown.
+    }
+    await trigger.stop();
+  };
+}
+
+// Default export must be a definition object for opencode 2.x and an object
+// with server() for opencode 1.x; the same value satisfies both contracts.
+export default {
+  id: "issue-trigger",
+  server,
+  setup,
+};

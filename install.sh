@@ -96,17 +96,15 @@ verify_permissions() {
   local dirs=(
     "${OPENCODE_DIR}"
     "${OPENCODE_DIR}/plugin"
-    "${OPENCODE_DIR}/plugins"
-    "${OPENCODE_DIR}/plugins/issue-trigger"
+    "${OPENCODE_DIR}/issue-trigger-lib"
   )
   for path in "${dirs[@]}"; do
     has_other_bits "${path}" 5 || die_on_mode "${stage}" "${path}"
   done
 
-  verify_tree "${stage}" "${OPENCODE_DIR}/plugin/issue-trigger-lib"
-  verify_tree "${stage}" "${OPENCODE_DIR}/plugins/issue-trigger/issue-trigger-lib"
+  verify_tree "${stage}" "${OPENCODE_DIR}/issue-trigger-lib"
 
-  for path in "${OPENCODE_DIR}/plugin/issue-trigger.ts" "${OPENCODE_DIR}/plugins/issue-trigger/index.ts"; do
+  for path in "${OPENCODE_DIR}/plugin/issue-trigger.ts"; do
     has_other_bits "${path}" 4 || die_on_mode "${stage}" "${path}"
   done
 
@@ -114,12 +112,11 @@ verify_permissions() {
 }
 
 mkdir -p "${LOG_DIR}"
-if ! mkdir -p "${OPENCODE_DIR}/plugin" "${OPENCODE_DIR}/plugins"; then
+if ! mkdir -p "${OPENCODE_DIR}/plugin"; then
   die "start" "无法写入 opencode 配置目录：${OPENCODE_DIR}"
 fi
 ensure_dir_traversable "${OPENCODE_DIR}"
 ensure_dir_traversable "${OPENCODE_DIR}/plugin"
-ensure_dir_traversable "${OPENCODE_DIR}/plugins"
 
 if command -v flock >/dev/null 2>&1; then
   exec 9>"${LOG_DIR}/install.lock"
@@ -160,31 +157,39 @@ install_file() {
   CLEANUP_TARGET=""
 }
 
+# Remove installs written by older layouts. Both hosts treat every subdirectory
+# of plugin/ and plugins/ as a plugin package, so the old library directory and
+# the old v2 entry directory would fail to load.
+remove_legacy() {
+  local stage="remove-legacy"
+  local path
+  for path in "${OPENCODE_DIR}/plugin/issue-trigger-lib" "${OPENCODE_DIR}/plugins/issue-trigger"; do
+    if [ -e "${path}" ] || [ -L "${path}" ]; then
+      rm -rf "${path}"
+      log INFO "${stage}" "removed legacy path ${path}"
+    fi
+  done
+}
+
 install_plugin() {
   local stage="install-plugin"
   log INFO "${stage}" "project=${PROJECT_ROOT} opencode=${OPENCODE_DIR}"
 
   [ -f "${PROJECT_ROOT}/plugin/issue-trigger.ts" ] || die "${stage}" "缺少 plugin/issue-trigger.ts"
-  [ -f "${PROJECT_ROOT}/plugins/issue-trigger/index.ts" ] || die "${stage}" "缺少 plugins/issue-trigger/index.ts"
-  [ -d "${PROJECT_ROOT}/plugin/issue-trigger-lib" ] || die "${stage}" "缺少 plugin/issue-trigger-lib"
+  [ -d "${PROJECT_ROOT}/issue-trigger-lib" ] || die "${stage}" "缺少 issue-trigger-lib"
 
-  mkdir -p "${OPENCODE_DIR}/plugin" "${OPENCODE_DIR}/plugins/issue-trigger"
-  ensure_dir_traversable "${OPENCODE_DIR}/plugins/issue-trigger"
+  remove_legacy
+  mkdir -p "${OPENCODE_DIR}/plugin"
 
   install_file "${PROJECT_ROOT}/plugin/issue-trigger.ts" "${OPENCODE_DIR}/plugin/issue-trigger.ts"
-  replace_dir "${PROJECT_ROOT}/plugin/issue-trigger-lib" "${OPENCODE_DIR}/plugin/issue-trigger-lib"
+  replace_dir "${PROJECT_ROOT}/issue-trigger-lib" "${OPENCODE_DIR}/issue-trigger-lib"
 
-  install_file "${PROJECT_ROOT}/plugins/issue-trigger/index.ts" "${OPENCODE_DIR}/plugins/issue-trigger/index.ts"
-  replace_dir "${PROJECT_ROOT}/plugin/issue-trigger-lib" "${OPENCODE_DIR}/plugins/issue-trigger/issue-trigger-lib"
-
-  [ -f "${OPENCODE_DIR}/plugin/issue-trigger.ts" ] || die "${stage}" "v1 入口安装失败"
-  [ -f "${OPENCODE_DIR}/plugins/issue-trigger/index.ts" ] || die "${stage}" "v2 入口安装失败"
-  [ -f "${OPENCODE_DIR}/plugin/issue-trigger-lib/index.mjs" ] || die "${stage}" "v1 库安装失败"
-  [ -f "${OPENCODE_DIR}/plugins/issue-trigger/issue-trigger-lib/index.mjs" ] || die "${stage}" "v2 库安装失败"
+  [ -f "${OPENCODE_DIR}/plugin/issue-trigger.ts" ] || die "${stage}" "插件入口安装失败"
+  [ -f "${OPENCODE_DIR}/issue-trigger-lib/index.mjs" ] || die "${stage}" "共享库安装失败"
 
   verify_permissions
 
-  log PASS "${stage}" "v1+v2 插件已安装"
+  log PASS "${stage}" "插件已安装（v1 + v2 共用入口）"
 }
 
 install_hooks() {
