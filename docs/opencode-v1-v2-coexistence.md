@@ -47,6 +47,23 @@
 - 库装到 `~/.config/opencode/<name>-lib/`，入口用 `../<name>-lib/index.mjs` 导入。
 - 不要同时装 `plugin/<name>.ts` 与 `plugins/<name>/index.ts`：两代都会各加载一次。若必须双入口，两者必须导入同一对象且 `id` 一致。
 
+## 配置层
+
+- 不要在同一份 `opencode.json(c)` 里同时写 `plugin` 与 `plugins` 键：v1 不认 `plugins`，双写会导致 v1 启动失败。
+- 本项目不依赖配置键，靠目录发现（`plugin/` + 库目录），无需按版本写键。
+
+## 事件订阅写法（v2）
+
+- `ctx.event.subscribe({ signal })` 返回 `AsyncIterable`，用 `for await` 消费；循环体里**不要 `return`** 跳过事件（会永久结束订阅），用 `continue` 或把单事件处理封成函数。
+- 订阅必须异步启动（`void (async () => { ... })()`），`setup` 要尽快返回清理函数；在 `setup` 里 `await for await` 会让宿主认为初始化卡死。
+- 清理函数里 `controller.abort()`；循环异常仅在未 abort 时告警。
+- 入口文件不要顶层静态导入宿主 SDK，保持零运行时依赖。
+
+## 版本口径
+
+- 本项目实测：opencode 1.18.14 接受对象默认导出并调用 `server()`；2.2.5 读取 `id` + `setup`。
+- 外部建议口径为「对象入口需 v1 ≥ 1.18.29」。两者不冲突：1.18.14 实测可用，更老版本未验证；面向未知 v1 版本分发时按 ≥1.18.29 声明更稳妥。
+
 ## 激活次数
 
 - v2 按 `id` 去重：同一 `id` 多次加载只调用一次 `setup`（实测同 id 3 次加载 → 1 次 `setup`；不同 id 3 次加载 → 3 次 `setup`）。
