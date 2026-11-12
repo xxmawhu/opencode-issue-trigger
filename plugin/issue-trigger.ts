@@ -1,19 +1,45 @@
 // OpenCode plugin entry, installed as ~/.config/opencode/plugin/issue-trigger.ts.
 //
-// Two host generations load this file:
-//   - opencode 1.x calls `server(input)` and uses the returned hook table.
-//   - opencode 2.x calls `setup(ctx)`; ctx is the client API and the value the
-//     function returns is the dispose callback.
-// Both hosts treat every subdirectory of plugin/ and plugins/ as a plugin
-// package, so the shared library lives one level up in ../issue-trigger-lib.
+// Single-entry dual export:
+//   - opencode 1.x reads the default object and calls `server(input)`.
+//   - opencode 2.x reads `id` + `setup(ctx)` from the same object.
+// `tui` is intentionally absent: the v1 loader rejects a `tui` field that
+// coexists with `server`. Hooks are not translated across generations; both
+// paths share the host-neutral core below and adapt only their own registration
+// surface.
 import { join } from "node:path";
 import { createIssueInputHandler, createIssueTrigger, createLogger } from "../issue-trigger-lib/index.mjs";
 
-function createRuntime({ directory, logger, listSessions, sendPrompt }) {
+// One host per project directory. A newer v1 host may run both the v1 and v2
+// passes, so `server()` and `setup()` can run in the same process; the refcount
+// keeps a single watcher/injector instead of injecting the same issue twice.
+const hosts = new Map();
+
+function createCore({ directory, logger, listSessions, sendPrompt }) {
   const issuesDir = join(directory, "issues");
   const inputHandler = createIssueInputHandler({ issuesDir, logger });
   const trigger = createIssueTrigger({ issuesDir, directory, logger, listSessions, sendPrompt });
   return { trigger, inputHandler };
+}
+
+function acquireHost(config) {
+  const existing = hosts.get(config.directory);
+  if (existing) {
+    existing.refs += 1;
+    return existing;
+  }
+  const host = { ...createCore(config), refs: 1 };
+  hosts.set(config.directory, host);
+  return host;
+}
+
+function releaseHost(directory) {
+  const host = hosts.get(directory);
+  if (!host) return undefined;
+  host.refs -= 1;
+  if (host.refs > 0) return undefined;
+  hosts.delete(directory);
+  return host.trigger.stop();
 }
 
 // Feeds the text parts of one user message to the issue command parser. The
@@ -85,6 +111,8 @@ function createContextHook(inputHandler, logger) {
   };
 }
 
+// V1 path: keep the classic initialization flow. The input facade is the v1
+// client shape, and the returned hook table is consumed by the v1 host.
 async function server(input) {
   const directory = input?.directory || input?.worktree || process.cwd();
   const client = input?.client;
@@ -106,7 +134,7 @@ async function server(input) {
     return {};
   }
 
-  const { trigger, inputHandler } = createRuntime({
+  const host = acquireHost({
     directory,
     logger,
     listSessions: async () => {
@@ -129,27 +157,34 @@ async function server(input) {
     },
   });
 
-  trigger.start().catch((error) => {
+  host.trigger.start().catch((error) => {
     logger.error("failed to start issue-trigger", { error: String(error) });
   });
 
-  logger.info("issue-trigger loaded", { issuesDir: trigger.issuesDir });
+  logger.info("issue-trigger loaded", { issuesDir: host.trigger.issuesDir });
 
   return {
     // v1 hook for user input. Read only the parts the user typed; host
     // synthesized parts are ignored.
     "chat.message": async (input, output) => {
-      handleParts({ inputHandler, logger, parts: output?.parts, messageID: input?.messageID });
+      handleParts({
+        inputHandler: host.inputHandler,
+        logger,
+        parts: output?.parts,
+        messageID: input?.messageID,
+      });
     },
     event: async ({ event }) => {
-      trigger.noteEvent(event);
+      host.trigger.noteEvent(event);
     },
     dispose: async () => {
-      await trigger.stop();
+      await releaseHost(directory);
     },
   };
 }
 
+// V2 path: adapt the v2 context to the same core, then bridge registrations.
+// `setup` returns the cleanup callback the v2 host expects.
 async function setup(ctx) {
   const directory = ctx?.location?.directory || ctx?.directory || process.cwd();
   // opencode 2.x exposes no app.log endpoint; stderr is captured by the host
@@ -166,7 +201,7 @@ async function setup(ctx) {
     return undefined;
   }
 
-  const { trigger, inputHandler } = createRuntime({
+  const host = acquireHost({
     directory,
     logger,
     listSessions: async () => {
@@ -182,8 +217,8 @@ async function setup(ctx) {
     },
   });
 
-  await trigger.start();
-  logger.info("issue-trigger loaded", { issuesDir: trigger.issuesDir });
+  await host.trigger.start();
+  logger.info("issue-trigger loaded", { issuesDir: host.trigger.issuesDir });
 
   const controller = new AbortController();
   const events =
@@ -193,7 +228,7 @@ async function setup(ctx) {
   if (events) {
     void (async () => {
       try {
-        for await (const event of events) trigger.noteEvent(event);
+        for await (const event of events) host.trigger.noteEvent(event);
       } catch (error) {
         // [log-review] 预期内：插件卸载或连接重建；降级原因：注入不依赖该事件流；影响范围：会话跟踪退化为最近会话
         if (!controller.signal.aborted) logger.warn("event stream ended", { error: String(error) });
@@ -204,7 +239,7 @@ async function setup(ctx) {
   let contextHook;
   if (typeof ctx?.session?.hook === "function") {
     try {
-      contextHook = await ctx.session.hook("context", createContextHook(inputHandler, logger));
+      contextHook = await ctx.session.hook("context", createContextHook(host.inputHandler, logger));
     } catch (error) {
       logger.error("failed to register session context hook", { error: String(error) });
     }
@@ -220,12 +255,13 @@ async function setup(ctx) {
     } catch {
       // Ignore dispose failures during shutdown.
     }
-    await trigger.stop();
+    await releaseHost(directory);
   };
 }
 
-// Default export must be a definition object for opencode 2.x and an object
-// with server() for opencode 1.x; the same value satisfies both contracts.
+// Default export: `server` for opencode 1.x, `id` + `setup` for opencode 2.x.
+// A plain object works because the v2 `define()` helper is an identity function,
+// so the entry has no runtime dependency on the host package.
 export default {
   id: "issue-trigger",
   server,

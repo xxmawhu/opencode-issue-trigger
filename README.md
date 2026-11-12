@@ -47,6 +47,23 @@ issue 记录：编译时缺少 zstd 头文件
 - v2：宿主调用 `setup(ctx)`。用户输入没有 `chat.message` 等价 hook，改用 `session.hook("context")` 读取每次模型调用前的消息列表；同一 `messageID` 只处理一次。监听注入链路使用 `ctx.session.list/prompt` 与 `ctx.event.subscribe`。
 - 共享库安装在 `~/.config/opencode/issue-trigger-lib`，不放在 `plugin/` 或 `plugins/` 下：两代宿主都会把这两个目录的子目录当作独立插件加载。
 
+## 单入口双导出
+
+默认导出是一个普通对象，同时携带两代加载器各自识别的字段：
+
+- `server(input)`：opencode 1.x 识别并调用，返回 v1 hook 表。
+- `id` + `setup(ctx)`：opencode 2.x 识别并调用，`setup` 返回清理函数。
+
+约束与已验证事实：
+
+- 两套 hook 不互转：v1 用返回的 hook 表，v2 用 `ctx.session.hook` / `ctx.event.subscribe` 注册；业务核心共用，注册层各自适配。
+- 只安装一份到 `~/.config/opencode/plugin/issue-trigger.ts`，不同时写入 `plugins/`。
+- 已实测版本：opencode 1.18.14、opencode 2.2.5。更老的 v1 宿主对对象入口的兼容性未验证。
+- 不提供 `tui` 字段：v1 加载器拒绝 `tui` 与 `server` 共存。
+- 同一目录按引用计数只保留一个 watcher；即使较新 v1 宿主同时运行 v1/v2 两套 pass，也不会重复注入。
+- v2 加载失败可能静默：验证时检查日志出现 `[issue-trigger] info issue-trigger loaded`，并实际放入一个 issue 文件确认注入，不能只看进程是否启动。
+- 入口使用普通对象，不依赖 `@opencode/plugin`：v2 的 `define()` 是恒等函数。
+
 ## 注入会话的选择
 
 服务端插件拿不到 TUI 当前显示的会话：官方插件 API 只有 `client` 与事件流，事件列表中没有会话焦点/切换事件，`tui.*` 也只是推送类端点。因此按「工作正在发生的会话」推断，优先级如下：
