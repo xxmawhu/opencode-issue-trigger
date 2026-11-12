@@ -19,6 +19,20 @@
 - v2：必须是对象且带 `id` + (`setup` | `effect`)；函数默认导出报 `Expected object at ["default"]`，无默认导出报 `Missing key at ["default"]`。
 - 通用写法：单对象 `{ id, server, setup }`，两代各自取用，互不干扰。
 
+## `setup` 可能收到 v1 形态的 input
+
+实测：`opencode 1.18.14` 只调用 `server(input)`；但存在 1.x 宿主会调用 `setup(ctx)`，传入的是经典 input：
+
+- 1.18.14 `server(input)` 的 input 键：`client, project, worktree, directory, experimental_workspace, serverUrl, $`
+- 这类 input 有 `client.session`，没有 v2 的 `ctx.session.prompt`、`ctx.event.subscribe`
+
+后果（均有实测复现）：
+
+- 未做形态识别：`setup` 判定「session client 不可用」并自禁用（`[issue-trigger] error ... disabled`）
+- 直接访问 `ctx.event.subscribe`：抛 `Cannot read properties of undefined (reading 'subscribe')`（bun/JSC 下文案为 `undefined is not an object (evaluating 'ctx.event.subscribe')`）
+
+写法：`setup` 开头判断 `typeof ctx.client?.session === "object"`，命中则转交 v1 路径并返回其 `dispose`；v2 路径的所有 ctx 接口（`event.subscribe`、`session.hook`、`session.list`）都要先判 `typeof === "function"`。
+
 ## 共享库位置
 
 - 共享库必须放在 `plugin/`、`plugins/` 之外（如 `~/.config/opencode/<name>-lib/`）。

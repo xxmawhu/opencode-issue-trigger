@@ -183,9 +183,23 @@ async function server(input) {
   };
 }
 
+// A 1.x host that inspects `setup` calls it with the classic v1 input
+// (`client` + `directory`, no v2 `session.prompt`). Delegating keeps the plugin
+// working instead of disabling itself on those builds.
+function isV1Context(ctx) {
+  return Boolean(ctx && typeof ctx.client?.session === "object");
+}
+
 // V2 path: adapt the v2 context to the same core, then bridge registrations.
 // `setup` returns the cleanup callback the v2 host expects.
 async function setup(ctx) {
+  if (isV1Context(ctx)) {
+    const hooks = await server(ctx);
+    return async () => {
+      await hooks?.dispose?.();
+    };
+  }
+
   const directory = ctx?.location?.directory || ctx?.directory || process.cwd();
   // opencode 2.x exposes no app.log endpoint; stderr is captured by the host
   // log (verified: --print-logs records console.error).

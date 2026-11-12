@@ -60,6 +60,7 @@ issue 记录：编译时缺少 zstd 头文件
 - 只安装一份到 `~/.config/opencode/plugin/issue-trigger.ts`，不同时写入 `plugins/`。
 - 已实测版本：opencode 1.18.14、opencode 2.2.5。更老的 v1 宿主对对象入口的兼容性未验证。
 - 不提供 `tui` 字段：v1 加载器拒绝 `tui` 与 `server` 共存。
+- 部分 1.x 宿主会调用 `setup(ctx)`，且传入的是 v1 形态的 input（有 `client`、无 v2 `session.prompt`）。`setup` 必须识别该形态并转交 v1 逻辑，否则会自禁用或报 `ctx.event.subscribe` 不可用。
 - 同一目录按引用计数只保留一个 watcher；即使较新 v1 宿主同时运行 v1/v2 两套 pass，也不会重复注入。
 - v2 加载失败可能静默：验证时检查日志出现 `[issue-trigger] info issue-trigger loaded`，并实际放入一个 issue 文件确认注入，不能只看进程是否启动。
 - 入口使用普通对象，不依赖 `@opencode/plugin`：v2 的 `define()` 是恒等函数。
