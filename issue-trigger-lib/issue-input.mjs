@@ -13,7 +13,11 @@
 import { existsSync, linkSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const ISSUE_COMMAND_PATTERN = /^issue\b[:：]?\s*([\s\S]+)$/i;
+// The command word must not continue into an ASCII identifier: `issue-trigger`,
+// `issue123` and `issue.ts` are ordinary prose, while `issue` followed by a
+// space, a colon, the end of the message or a non-ASCII character (for example
+// `issue中文`) is still the command.
+export const ISSUE_COMMAND_PATTERN = /^issue(?=\s|[:：]|$|[^\x00-\x7F])\s*[:：]?\s*([\s\S]*)$/i;
 export const INJECTED_PROMPT_PREFIX = "请分析./issues/";
 export const INJECTED_PROMPT_PREFIXES = [INJECTED_PROMPT_PREFIX, "请严格遵守./plan/"];
 
@@ -46,7 +50,7 @@ export function parseIssueCommand(text) {
 // True when the message is an issue command even if its body is empty.
 export function matchesIssueCommand(text) {
   if (typeof text !== "string") return false;
-  return /^issue\b[:：]?/i.test(unwrapQuotes(text));
+  return /^issue(?=\s|[:：]|$|[^\x00-\x7F])/i.test(unwrapQuotes(text));
 }
 
 function slugify(body) {
