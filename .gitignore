@@ -12,6 +12,7 @@ data/
 
 # 本地临时产物
 .var/
+/tmp/
 *.tmp
 *.temp
 *.swp
