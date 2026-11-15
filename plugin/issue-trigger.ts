@@ -190,6 +190,19 @@ function isV1Context(ctx) {
   return Boolean(ctx && typeof ctx.client?.session === "object");
 }
 
+// opencode 1.18.14 TUI also calls `setup()` once with its config object
+// (keys: options/agent/aisdk/catalog/command/integration/plugin/reference/skill;
+// no client, location, event or session). That call carries no session work:
+// the classic `server()` path already handles it. Treating this shape as a v2
+// context made the plugin log a red "disabled" line on every v1 TUI start.
+function isObject(value) {
+  return typeof value === "object" && value !== null;
+}
+
+function isV2Context(ctx) {
+  return isObject(ctx) && (isObject(ctx.location) || isObject(ctx.event) || isObject(ctx.session));
+}
+
 // V2 path: adapt the v2 context to the same core, then bridge registrations.
 // `setup` returns the cleanup callback the v2 host expects.
 async function setup(ctx) {
@@ -198,6 +211,13 @@ async function setup(ctx) {
     return async () => {
       await hooks?.dispose?.();
     };
+  }
+
+  if (!isV2Context(ctx)) {
+    // v1 config callback (see isV2Context): no session capability is expected
+    // here, and there is nothing to register. Returning undefined keeps the
+    // host silent; the v1 `server()` call remains the active path.
+    return undefined;
   }
 
   const directory = ctx?.location?.directory || ctx?.directory || process.cwd();
@@ -211,7 +231,9 @@ async function setup(ctx) {
   });
 
   if (typeof ctx?.session?.prompt !== "function") {
-    logger.error("opencode session client is unavailable; issue-trigger disabled");
+    // A v2 ctx without a prompt API cannot inject. Expected degradation: stay
+    // silent because the TUI renders console output as a red error line and
+    // this host exposes no file logger.
     return undefined;
   }
 
