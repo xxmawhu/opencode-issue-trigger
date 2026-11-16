@@ -217,6 +217,11 @@ async function setup(ctx) {
     return undefined;
   }
   if (major < 2) {
+    // A v1 host reports its version only on the plugin input (which carries
+    // `client`). A versioned ctx without `client` is the config callback, not
+    // the plugin input, so it must stay inert instead of starting a watcher
+    // that cannot reach the session API.
+    if (!isV1Input(ctx)) return undefined;
     const hooks = await server(ctx);
     return async () => {
       await hooks?.dispose?.();
