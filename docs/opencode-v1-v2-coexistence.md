@@ -18,20 +18,19 @@
 - v1：必须是对象且带 `server()`（`must default export an object with server()`）；带 `tui` 字段会被拒。
 - v2：必须是对象且带 `id` + (`setup` | `effect`)；函数默认导出报 `Expected object at ["default"]`，无默认导出报 `Missing key at ["default"]`。
 - 通用写法：单对象 `{ id, server, setup }`，两代各自取用，互不干扰。
+- 对象必须直接作为默认导出：不包 `define()`（当前是恒等函数，无收益）、不做对象展开（会丢掉未来版本可能附加的不可枚举品牌标记）。
 
-## `setup` 可能收到 v1 形态的 input
+## 入口判别：认注册面，不认版本号
 
-实测：`opencode 1.18.14` 只调用 `server(input)`；但存在 1.x 宿主会调用 `setup(ctx)`，传入的是经典 input：
+实测：`opencode 1.18.14` / `1.19.5` 的 `server(input)` 携带 `directory` 与 `client.session`；TUI 会把配置形状对象传给 `setup`（`options/agent/catalog/...`，无 client、无 location、无 session）。
 
-- 1.18.14 `server(input)` 的 input 键：`client, project, worktree, directory, experimental_workspace, serverUrl, $`
-- 这类 input 有 `client.session`，没有 v2 的 `ctx.session.prompt`、`ctx.event.subscribe`
+判别规则（两代各查自己的注册面）：
 
-后果（均有实测复现）：
+- `server`：`directory|worktree` 是字符串，且 `client.session.list` 与 `client.session.prompt|promptAsync` 是函数 → 执行 v1 接线；否则返回空钩子表，不做事。
+- `setup`：`location.directory` 是字符串，且顶层 `session.list`、`session.prompt` 是函数 → 执行 v2 接线；否则返回 `undefined`，不做事。
+- 全程不读版本号：版本是宿主可给可不给的弱信号，注册面有无是强事实。v1 配置回调、未知形态上下文都因缺 v2 注册面自然落入不动作分支。
 
-- 未做形态识别：`setup` 判定「session client 不可用」并自禁用（`[issue-trigger] error ... disabled`）
-- 直接访问 `ctx.event.subscribe`：抛 `Cannot read properties of undefined (reading 'subscribe')`（bun/JSC 下文案为 `undefined is not an object (evaluating 'ctx.event.subscribe')`）
-
-写法：`setup` 开头判断 `typeof ctx.client?.session === "object"`，命中则转交 v1 路径并返回其 `dispose`；v2 路径的所有 ctx 接口（`event.subscribe`、`session.hook`、`session.list`）都要先判 `typeof === "function"`。
+v2 路径的所有 ctx 接口（`event.subscribe`、`session.hook`、`session.list`）仍要先判 `typeof === "function"`。
 
 ## 共享库位置
 

@@ -1,12 +1,13 @@
 // OpenCode plugin entry, installed as ~/.config/opencode/plugin/issue-trigger.ts.
 //
-// Single-entry dual export:
+// Dual-generation export, one plain object literal:
 //   - opencode 1.x reads the default object and calls `server(input)`.
-//   - opencode 2.x reads `id` + `setup(ctx)` from the same object.
+//   - opencode 2.x validates `id` + `setup(ctx)` on the same object.
+// The literal is exported as-is: no helper wrapping, no spreading. `define()` is
+// an identity function today and spreading would drop any non-enumerable brand a
+// future host attaches.
 // `tui` is intentionally absent: the v1 loader rejects a `tui` field that
-// coexists with `server`. Hooks are not translated across generations; both
-// paths share the host-neutral core below and adapt only their own registration
-// surface.
+// coexists with `server`.
 import { join } from "node:path";
 import { createIssueInputHandler, createIssueTrigger, createLogger } from "../issue-trigger-lib/index.mjs";
 
@@ -111,11 +112,33 @@ function createContextHook(inputHandler, logger) {
   };
 }
 
-// V1 path: keep the classic initialization flow. The input facade is the v1
-// client shape, and the returned hook table is consumed by the v1 host.
+// Generation is decided by the registration surface actually present in the
+// input, never by a version string:
+//   - v1 input carries `directory` (or `worktree`) plus `client.session`.
+//   - v2 context carries `location.directory` plus a top-level `session` object.
+// Missing surface means "not my generation": the adapter stays inert.
+function v1Surface(input) {
+  const directory = input?.directory ?? input?.worktree;
+  if (typeof directory !== "string" || directory.length === 0) return undefined;
+  const session = input?.client?.session;
+  if (typeof session?.list !== "function") return undefined;
+  if (typeof session?.prompt !== "function" && typeof session?.promptAsync !== "function") return undefined;
+  return directory;
+}
+
+function v2Surface(ctx) {
+  if (typeof ctx?.location?.directory !== "string" || ctx.location.directory.length === 0) return undefined;
+  if (typeof ctx?.session?.list !== "function") return undefined;
+  if (typeof ctx?.session?.prompt !== "function") return undefined;
+  return ctx.location.directory;
+}
+
+// V1 adapter: translate the core into the classic initialization flow. The
+// returned hook table is what the v1 host consumes.
 async function server(input) {
-  const directory = input?.directory || input?.worktree || process.cwd();
-  const client = input?.client;
+  const directory = v1Surface(input);
+  if (!directory) return {};
+  const client = input.client;
   // Logging goes to opencode's own log sink; the plugin never owns a log file.
   const logger = createLogger({
     sink: (level, message, extra) =>
@@ -178,57 +201,16 @@ async function server(input) {
   };
 }
 
-// Host generation is resolved from the host-reported version, never from
-// capability probing:
-//   - v2 passes `ctx.app.version` (verified 2.2.5: {name:"cli",version:"2.2.5"}).
-//   - v1 exposes no version field in any plugin input (verified 1.18.14:
-//     server input keys client/project/worktree/directory/...; setup config
-//     keys options/agent/catalog/...). The v1 input facade is the only shape
-//     carrying `client`, and v1 `setup` config callbacks carry neither.
-// Unknown shapes are treated as the v1 config callback and ignored.
-function isObject(value) {
-  return typeof value === "object" && value !== null;
-}
-
-function hostMajor(ctx) {
-  const version = ctx?.app?.version;
-  if (typeof version !== "string") return null;
-  const major = Number.parseInt(version, 10);
-  return Number.isInteger(major) ? major : null;
-}
-
-function isV1Input(ctx) {
-  return isObject(ctx) && isObject(ctx.client);
-}
-
-// V2 path: adapt the v2 context to the same core, then bridge registrations.
-// `setup` returns the cleanup callback the v2 host expects.
+// V2 adapter: translate the same core onto context methods, then return the
+// cleanup callback the v2 host expects.
 async function setup(ctx) {
-  const major = hostMajor(ctx);
-  if (major === null) {
-    if (isV1Input(ctx)) {
-      const hooks = await server(ctx);
-      return async () => {
-        await hooks?.dispose?.();
-      };
-    }
-    // v1 config callback: no version and no client. Session work belongs to
-    // the classic server() call, so there is nothing to register here.
+  const directory = v2Surface(ctx);
+  if (!directory) {
+    // v1 config callbacks and any other context without the v2 surface are not
+    // this entry's job; staying inert avoids a watcher that cannot reach the
+    // session API.
     return undefined;
   }
-  if (major < 2) {
-    // A v1 host reports its version only on the plugin input (which carries
-    // `client`). A versioned ctx without `client` is the config callback, not
-    // the plugin input, so it must stay inert instead of starting a watcher
-    // that cannot reach the session API.
-    if (!isV1Input(ctx)) return undefined;
-    const hooks = await server(ctx);
-    return async () => {
-      await hooks?.dispose?.();
-    };
-  }
-
-  const directory = ctx?.location?.directory || ctx?.directory || process.cwd();
   // opencode 2.x exposes no app.log endpoint; stderr is captured by the host
   // log (verified: --print-logs records console.error).
   const logger = createLogger({
@@ -242,7 +224,6 @@ async function setup(ctx) {
     directory,
     logger,
     listSessions: async () => {
-      if (typeof ctx?.session?.list !== "function") return [];
       const page = await ctx.session.list({ directory, limit: 50 });
       if (Array.isArray(page)) return page;
       if (Array.isArray(page?.data)) return page.data;
@@ -296,18 +277,6 @@ async function setup(ctx) {
   };
 }
 
-// Default export: `server` for opencode 1.x, `id` + `setup` for opencode 2.x.
-// Newer v2 hosts only accept a definition produced by their own
-// `@opencode/plugin` helper, while v1 hosts have no such module and fail the
-// whole entry when a static import cannot resolve. The helper is therefore
-// probed at load time and the plain definition is used when it is absent.
-let definition = { id: "issue-trigger", setup };
-try {
-  const hostPlugin = await import("@opencode/plugin");
-  if (typeof hostPlugin?.Plugin?.define === "function") {
-    definition = hostPlugin.Plugin.define(definition);
-  }
-} catch {
-  // v1: the helper module does not exist; the plain definition is enough.
-}
-export default { ...definition, server };
+// `server` for opencode 1.x, `id` + `setup` for opencode 2.x. Both generations
+// read this exact literal; it is never rewritten, wrapped or spread.
+export default { id: "issue-trigger", server, setup };
