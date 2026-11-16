@@ -14,6 +14,8 @@ OPENCODE_DIR="${HOME}/.config/opencode"
 LOG_DIR="${PROJECT_ROOT}/log"
 LOG_FILE="${LOG_DIR}/install.$(date +%Y%m%d).log"
 CLEANUP_TARGET=""
+LINK_MODE=0
+VERIFY_RUNTIME=0
 
 log() {
   local level="$1"
@@ -171,9 +173,30 @@ remove_legacy() {
   done
 }
 
+# Development installs link the checkout instead of copying it, so edits are
+# picked up without reinstalling. Both hosts read through the symlink.
+install_link() {
+  local src="$1"
+  local dst="$2"
+  local backup="${dst}.old.$$"
+  if [[ -d "${dst}" && ! -L "${dst}" ]]; then
+    # A real directory cannot be replaced by `ln -sfn`; move it aside first so
+    # the link is published by a single rename.
+    mv "${dst}" "${backup}"
+    ln -s "${src}" "${dst}"
+    rm -rf "${backup}"
+    return 0
+  fi
+  ln -sfn "${src}" "${dst}"
+}
+
 install_plugin() {
   local stage="install-plugin"
-  log INFO "${stage}" "project=${PROJECT_ROOT} opencode=${OPENCODE_DIR}"
+  local mode_name="copy"
+  if [ "${LINK_MODE}" -eq 1 ]; then
+    mode_name="link"
+  fi
+  log INFO "${stage}" "project=${PROJECT_ROOT} opencode=${OPENCODE_DIR} mode=${mode_name}"
 
   [ -f "${PROJECT_ROOT}/plugin/issue-trigger.ts" ] || die "${stage}" "缺少 plugin/issue-trigger.ts"
   [ -d "${PROJECT_ROOT}/issue-trigger-lib" ] || die "${stage}" "缺少 issue-trigger-lib"
@@ -181,15 +204,99 @@ install_plugin() {
   remove_legacy
   mkdir -p "${OPENCODE_DIR}/plugin"
 
-  install_file "${PROJECT_ROOT}/plugin/issue-trigger.ts" "${OPENCODE_DIR}/plugin/issue-trigger.ts"
-  replace_dir "${PROJECT_ROOT}/issue-trigger-lib" "${OPENCODE_DIR}/issue-trigger-lib"
+  if [ "${LINK_MODE}" -eq 1 ]; then
+    install_link "${PROJECT_ROOT}/plugin/issue-trigger.ts" "${OPENCODE_DIR}/plugin/issue-trigger.ts"
+    install_link "${PROJECT_ROOT}/issue-trigger-lib" "${OPENCODE_DIR}/issue-trigger-lib"
+  else
+    install_file "${PROJECT_ROOT}/plugin/issue-trigger.ts" "${OPENCODE_DIR}/plugin/issue-trigger.ts"
+    replace_dir "${PROJECT_ROOT}/issue-trigger-lib" "${OPENCODE_DIR}/issue-trigger-lib"
+  fi
 
-  [ -f "${OPENCODE_DIR}/plugin/issue-trigger.ts" ] || die "${stage}" "插件入口安装失败"
-  [ -f "${OPENCODE_DIR}/issue-trigger-lib/index.mjs" ] || die "${stage}" "共享库安装失败"
+  [ -e "${OPENCODE_DIR}/plugin/issue-trigger.ts" ] || die "${stage}" "插件入口安装失败"
+  [ -e "${OPENCODE_DIR}/issue-trigger-lib/index.mjs" ] || die "${stage}" "共享库安装失败"
 
   verify_permissions
 
-  log PASS "${stage}" "插件已安装（v1 + v2 共用入口）"
+  log PASS "${stage}" "插件已安装（v1 + v2 共用入口，mode=${mode_name}）"
+}
+
+# Post-install self-check step 1: every installed byte must match the checkout.
+# `cmp` follows symlinks, so this also covers `--link` installs.
+verify_contents() {
+  local stage="verify-contents"
+  local src dst file name count=0
+  src="${PROJECT_ROOT}/plugin/issue-trigger.ts"
+  dst="${OPENCODE_DIR}/plugin/issue-trigger.ts"
+  cmp -s "${src}" "${dst}" || die "${stage}" "入口文件与仓库不一致：${dst}"
+  for file in "${PROJECT_ROOT}/issue-trigger-lib/"*.mjs; do
+    [[ -e "${file}" ]] || break
+    name="$(basename "${file}")"
+    cmp -s "${file}" "${OPENCODE_DIR}/issue-trigger-lib/${name}" ||
+      die "${stage}" "共享库文件与仓库不一致：issue-trigger-lib/${name}"
+    count=$((count + 1))
+  done
+  [[ "${count}" -gt 0 ]] || die "${stage}" "仓库内没有可安装的共享库文件"
+  for file in "${OPENCODE_DIR}/issue-trigger-lib/"*.mjs; do
+    [[ -e "${file}" ]] || break
+    name="$(basename "${file}")"
+    [[ -f "${PROJECT_ROOT}/issue-trigger-lib/${name}" ]] ||
+      die "${stage}" "安装目录存在仓库外文件：issue-trigger-lib/${name}"
+  done
+  log PASS "${stage}" "已装文件与仓库一致（1 入口 + ${count} 库文件）"
+}
+
+# Post-install self-check step 2: the host must list the plugin. Skipped when no
+# `opencode` binary is on PATH (installers may run on hosts that only serve the
+# shared config directory).
+verify_plugin_list() {
+  local stage="verify-list"
+  local output
+  if ! command -v opencode >/dev/null 2>&1; then
+    log INFO "${stage}" "PATH 中无 opencode，跳过插件列表检查"
+    return 0
+  fi
+  if ! output="$(timeout 60 opencode debug info 2>&1)"; then
+    die "${stage}" "opencode debug info 执行失败"
+  fi
+  [[ "${output}" == *issue-trigger* ]] ||
+    die "${stage}" "opencode debug info 未列出 issue-trigger"
+  log PASS "${stage}" "opencode debug info 已列出 issue-trigger"
+}
+
+# Post-install self-check step 3: load the plugin in a real host process and
+# assert the load-success log, no LoadError. Costs one short headless run, so it
+# only runs when `--verify` is passed (the regression script always passes it).
+verify_load() {
+  local stage="verify-load"
+  local output
+  if [ "${VERIFY_RUNTIME}" -ne 1 ]; then
+    log INFO "${stage}" "未指定 --verify，跳过加载断言"
+    return 0
+  fi
+  if ! command -v opencode >/dev/null 2>&1; then
+    log INFO "${stage}" "PATH 中无 opencode，跳过加载断言"
+    return 0
+  fi
+  mkdir -p "${PROJECT_ROOT}/.var"
+  output="${PROJECT_ROOT}/.var/install-verify.$$.log"
+  CLEANUP_TARGET="${output}"
+  if ! ( cd "${PROJECT_ROOT}" && timeout 90 opencode run verify \
+    --model nonexistent/nonexistent --print-logs --log-level DEBUG ) >"${output}" 2>&1; then
+    log INFO "${stage}" "run 返回非 0（模型名不存在属预期），继续检查日志"
+  fi
+  if [[ "$(<"${output}")" == *"failed to load plugin"* ]]; then
+    rm -f "${output}"
+    CLEANUP_TARGET=""
+    die "${stage}" "宿主加载插件失败（日志出现 failed to load plugin）"
+  fi
+  if [[ "$(<"${output}")" != *"issue-trigger loaded"* ]]; then
+    rm -f "${output}"
+    CLEANUP_TARGET=""
+    die "${stage}" "日志中未出现 issue-trigger loaded"
+  fi
+  rm -f "${output}"
+  CLEANUP_TARGET=""
+  log PASS "${stage}" "宿主加载成功且无 LoadError"
 }
 
 install_hooks() {
@@ -206,12 +313,39 @@ install_hooks() {
   fi
 }
 
+usage() {
+  cat <<'EOF'
+用法: bash install.sh [选项]
+
+  （无参数）   复制安装入口与共享库，并做静态自检
+  --link       开发期符号链接安装：入口与共享库指向本仓库，改代码无需重装
+  --verify     额外做加载断言：启动一次宿主进程，要求出现 issue-trigger loaded 且无 LoadError
+  -h, --help   显示本帮助
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --link) LINK_MODE=1 ;;
+      --verify) VERIFY_RUNTIME=1 ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage >&2; die "args" "未知参数: $1" ;;
+    esac
+    shift
+  done
+}
+
 main() {
+  parse_args "$@"
   log INFO "start" "开始安装 opencode-issue-trigger"
   # Runtime directories are never committed; recreate them on install.
   mkdir -p "${PROJECT_ROOT}/issues" "${PROJECT_ROOT}/plan" "${PROJECT_ROOT}/memory" "${PROJECT_ROOT}/end_task"
   install_plugin
+  verify_contents
+  verify_plugin_list
   install_hooks
+  verify_load
   log PASS "done" "安装完成"
   printf '✅ opencode-issue-trigger installed（日志 log/install.%s.log）\n' "$(date +%Y%m%d)"
 }

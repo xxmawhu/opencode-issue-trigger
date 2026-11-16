@@ -58,9 +58,9 @@ issue 记录：编译时缺少 zstd 头文件
 
 - 两套 hook 不互转：v1 用返回的 hook 表，v2 用 `ctx.session.hook` / `ctx.event.subscribe` 注册；业务核心共用，注册层各自适配。
 - 只安装一份到 `~/.config/opencode/plugin/issue-trigger.ts`，不同时写入 `plugins/`。
-- 已实测版本：opencode 1.18.14、opencode 2.2.5。更老的 v1 宿主对对象入口的兼容性未验证。
+- 已实测版本：opencode 1.19.5、opencode 1.18.14、opencode 2.2.5。对象入口的官方支持下限为 1.18.29，更老的 v1 宿主未验证。
 - 不提供 `tui` 字段：v1 加载器拒绝 `tui` 与 `server` 共存。
-- 部分 1.x 宿主会调用 `setup(ctx)`，且传入的是 v1 形态的 input（有 `client`、无 v2 `session.prompt`）。`setup` 必须识别该形态并转交 v1 逻辑，否则会自禁用或报 `ctx.event.subscribe` 不可用。
+- 代际判别只看注册面，不读版本号：`server` 要求 `directory|worktree` + `client.session`；`setup` 要求 `location.directory` + 顶层 `session.list/prompt`。缺注册面的上下文（如 v1 的配置回调）直接不动作，v1 会话由 `server` 承担。
 - 同一目录按引用计数只保留一个 watcher；即使较新 v1 宿主同时运行 v1/v2 两套 pass，也不会重复注入。
 - v2 加载失败可能静默：验证时检查日志出现 `[issue-trigger] info issue-trigger loaded`，并实际放入一个 issue 文件确认注入，不能只看进程是否启动。
 - 入口使用普通对象，不依赖 `@opencode/plugin`：v2 的 `define()` 是恒等函数。
@@ -99,7 +99,25 @@ bash install.sh
 3. 删除旧布局（`plugin/issue-trigger-lib`、`plugins/issue-trigger`），避免重复加载与加载失败。
 4. 用 `pre-commit` 注册 `pre-commit` 与 `post-merge` git hooks。
 
+安装选项：
+
+- `bash install.sh`：复制安装，并做静态自检（已装文件与仓库逐文件比对、宿主插件列表包含 issue-trigger）。
+- `bash install.sh --link`：开发期符号链接安装，入口与共享库指向当前仓库，改代码无需重装。
+- `bash install.sh --verify`：在静态自检之外追加加载断言——启动一次宿主进程，要求日志出现 `issue-trigger loaded` 且无 `failed to load plugin`。
+
 安装完成后重启 opencode 即可生效。
+
+## 回归验证
+
+`scripts/verify-regression.sh` 在隔离 HOME 中复现完整链路：安装（复制 + 符号链接）→ 启动 → 断言无 LoadError → 放入 issue → 断言注入一次 → 重启再跑 → 断言同一 issue 每进程仅注入一次。
+
+```bash
+bash scripts/verify-regression.sh                      # v1，默认 3 轮
+OPENCODE_V2=/path/to/opencode2 bash scripts/verify-regression.sh   # 追加 v2 轮次
+OPENCODE_V1=/path/to/opencode bash scripts/verify-regression.sh     # 覆盖 v1 路径
+```
+
+脚本把完整过程写入 `log/verify-regression.YYYYMMDD.log`，屏幕只输出每步 ✅/❌。
 
 ## 自动更新
 
