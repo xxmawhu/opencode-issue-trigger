@@ -297,10 +297,17 @@ async function setup(ctx) {
 }
 
 // Default export: `server` for opencode 1.x, `id` + `setup` for opencode 2.x.
-// A plain object works because the v2 `define()` helper is an identity function,
-// so the entry has no runtime dependency on the host package.
-export default {
-  id: "issue-trigger",
-  server,
-  setup,
-};
+// Newer v2 hosts only accept a definition produced by their own
+// `@opencode/plugin` helper, while v1 hosts have no such module and fail the
+// whole entry when a static import cannot resolve. The helper is therefore
+// probed at load time and the plain definition is used when it is absent.
+let definition = { id: "issue-trigger", setup };
+try {
+  const hostPlugin = await import("@opencode/plugin");
+  if (typeof hostPlugin?.Plugin?.define === "function") {
+    definition = hostPlugin.Plugin.define(definition);
+  }
+} catch {
+  // v1: the helper module does not exist; the plain definition is enough.
+}
+export default { ...definition, server };
