@@ -129,11 +129,6 @@ async function server(input) {
       }),
   });
 
-  if (!client?.session) {
-    logger.error("opencode session client is unavailable; issue-trigger disabled");
-    return {};
-  }
-
   const host = acquireHost({
     directory,
     logger,
@@ -183,41 +178,49 @@ async function server(input) {
   };
 }
 
-// A 1.x host that inspects `setup` calls it with the classic v1 input
-// (`client` + `directory`, no v2 `session.prompt`). Delegating keeps the plugin
-// working instead of disabling itself on those builds.
-function isV1Context(ctx) {
-  return Boolean(ctx && typeof ctx.client?.session === "object");
-}
-
-// opencode 1.18.14 TUI also calls `setup()` once with its config object
-// (keys: options/agent/aisdk/catalog/command/integration/plugin/reference/skill;
-// no client, location, event or session). That call carries no session work:
-// the classic `server()` path already handles it. Treating this shape as a v2
-// context made the plugin log a red "disabled" line on every v1 TUI start.
+// Host generation is resolved from the host-reported version, never from
+// capability probing:
+//   - v2 passes `ctx.app.version` (verified 2.2.5: {name:"cli",version:"2.2.5"}).
+//   - v1 exposes no version field in any plugin input (verified 1.18.14:
+//     server input keys client/project/worktree/directory/...; setup config
+//     keys options/agent/catalog/...). The v1 input facade is the only shape
+//     carrying `client`, and v1 `setup` config callbacks carry neither.
+// Unknown shapes are treated as the v1 config callback and ignored.
 function isObject(value) {
   return typeof value === "object" && value !== null;
 }
 
-function isV2Context(ctx) {
-  return isObject(ctx) && (isObject(ctx.location) || isObject(ctx.event) || isObject(ctx.session));
+function hostMajor(ctx) {
+  const version = ctx?.app?.version;
+  if (typeof version !== "string") return null;
+  const major = Number.parseInt(version, 10);
+  return Number.isInteger(major) ? major : null;
+}
+
+function isV1Input(ctx) {
+  return isObject(ctx) && isObject(ctx.client);
 }
 
 // V2 path: adapt the v2 context to the same core, then bridge registrations.
 // `setup` returns the cleanup callback the v2 host expects.
 async function setup(ctx) {
-  if (isV1Context(ctx)) {
+  const major = hostMajor(ctx);
+  if (major === null) {
+    if (isV1Input(ctx)) {
+      const hooks = await server(ctx);
+      return async () => {
+        await hooks?.dispose?.();
+      };
+    }
+    // v1 config callback: no version and no client. Session work belongs to
+    // the classic server() call, so there is nothing to register here.
+    return undefined;
+  }
+  if (major < 2) {
     const hooks = await server(ctx);
     return async () => {
       await hooks?.dispose?.();
     };
-  }
-
-  if (!isV2Context(ctx)) {
-    // v1 config callback (see isV2Context): no session capability is expected
-    // here, and there is nothing to register. Returning undefined keeps the
-    // host silent; the v1 `server()` call remains the active path.
-    return undefined;
   }
 
   const directory = ctx?.location?.directory || ctx?.directory || process.cwd();
@@ -229,13 +232,6 @@ async function setup(ctx) {
       console.error(`[issue-trigger] ${level} ${message}${suffix}`);
     },
   });
-
-  if (typeof ctx?.session?.prompt !== "function") {
-    // A v2 ctx without a prompt API cannot inject. Expected degradation: stay
-    // silent because the TUI renders console output as a red error line and
-    // this host exposes no file logger.
-    return undefined;
-  }
 
   const host = acquireHost({
     directory,
