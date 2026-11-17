@@ -97,7 +97,7 @@ bash install.sh
 1. 把插件入口安装到 `~/.config/opencode/plugin/issue-trigger.ts`，同一文件内的 `server()` 与 `setup()` 分别服务 v1 与 v2。
 2. 把共享库安装到 `~/.config/opencode/issue-trigger-lib`。
 3. 删除旧布局（`plugin/issue-trigger-lib`、`plugins/issue-trigger`），避免重复加载与加载失败。
-4. 用 `pre-commit` 注册 `pre-commit` 与 `post-merge` git hooks。
+4. 用平台 `pre-commit`（`/opt/miniconda3/bin/pre-commit`）注册 `pre-commit` 与 `post-merge` git hooks。
 
 安装选项：
 

@@ -16,6 +16,9 @@ LOG_FILE="${LOG_DIR}/install.$(date +%Y%m%d).log"
 CLEANUP_TARGET=""
 LINK_MODE=0
 VERIFY_RUNTIME=0
+# Platform tools live under the platform Python prefix; agent accounts no longer
+# carry /opt/miniconda3/bin on PATH, so resolve pre-commit by absolute path only.
+PRE_COMMIT_BIN="/opt/miniconda3/bin/pre-commit"
 
 log() {
   local level="$1"
@@ -301,12 +304,10 @@ verify_load() {
 
 install_hooks() {
   local stage="install-hooks"
-  if ! command -v pre-commit >/dev/null 2>&1; then
-    die "${stage}" "未找到 pre-commit，无法注册 git hooks"
-  fi
+  [ -x "${PRE_COMMIT_BIN}" ] || die "${stage}" "未找到 ${PRE_COMMIT_BIN}，无法注册 git hooks"
   [ -f "${PROJECT_ROOT}/.pre-commit-config.yaml" ] || die "${stage}" "缺少 .pre-commit-config.yaml"
 
-  if (cd "${PROJECT_ROOT}" && pre-commit install --hook-type pre-commit --hook-type post-merge >>"${LOG_FILE}" 2>&1); then
+  if (cd "${PROJECT_ROOT}" && "${PRE_COMMIT_BIN}" install --hook-type pre-commit --hook-type post-merge >>"${LOG_FILE}" 2>&1); then
     log PASS "${stage}" "pre-commit 与 post-merge hooks 已注册"
   else
     die "${stage}" "pre-commit install 失败"
