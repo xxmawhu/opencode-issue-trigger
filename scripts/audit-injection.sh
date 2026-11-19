@@ -11,14 +11,27 @@
 #      never injected it inside the window
 #   3. dispatch health: probe timeouts and fail-closed skips in the newest
 #      scan_issue hourly log
+#   4. runtime drift: scan_issue process start time vs published binary mtime,
+#      plus [SELF-CHECK] log evidence, so a published-but-not-running build is
+#      visible every day instead of only when someone notices stale behavior
 #
 # A finding writes ./issues/<ts>_injection-audit.md so the reminder plugin picks
 # it up like any other issue; one open audit issue at a time (deduplicated).
+# Runtime drift is additionally rate-limited to one report per 7 days: it stays
+# blocked until the owning user restarts the process, and a daily reminder adds
+# no information.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 HOME_ROOTS=(/mnt/beegfs_data/usr/maxx/dev /mnt/beegfs_data/usr/maxx/quant)
 SCAN_LOG_DIR="/mnt/beegfs_data/usr/maxx/regular_task/scan_issue/log"
+SCAN_PUBLISHED="/data/alpha/share/scan_issue/scan_issue"
+SCAN_DRIFT_MARKER="${ROOT}/.var/scan-drift-last-report"
+# A published build older than the process start is normal; the reverse means the
+# running image predates what is on disk. Ignore a 30-minute window so a build
+# that was just published, and is about to be picked up, is not reported.
+SCAN_DRIFT_GRACE=1800
+SCAN_DRIFT_REPORT_DAYS=7
 LOG_DIR="${ROOT}/log"
 LOG_FILE="${LOG_DIR}/injection-audit.$(date +%Y%m%d).log"
 ISSUES_DIR="${ROOT}/issues"
@@ -145,6 +158,49 @@ summarize_dispatch() {
     }' "${latest}" >>"${TMP_DIR}/findings.txt"
 }
 
+# Published build vs running image. The process may belong to another user, so
+# only read-only facts are used: /proc start time (etimes) and the published
+# mtime. [SELF-CHECK] log lines prove the new self-check code is running.
+check_scan_runtime() {
+  local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
+  local -a logs=()
+
+  if [[ ! -f "${SCAN_PUBLISHED}" ]]; then
+    printf 'SCANSTOPPED\tstate=published-missing\tpath=%s\n' "${SCAN_PUBLISHED}" >>"${TMP_DIR}/findings.txt"
+    return 0
+  fi
+
+  pub_mtime="$(stat -c %Y "${SCAN_PUBLISHED}" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  pid="$(pgrep -f "^${SCAN_PUBLISHED} " 2>/dev/null | head -1)"
+  if [[ -z "${pid}" ]]; then
+    printf 'SCANSTOPPED\tstate=no-process\tpublished_mtime=%s\n' \
+      "$(date -d "@${pub_mtime}" '+%Y-%m-%dT%H:%M:%S')" >>"${TMP_DIR}/findings.txt"
+    return 0
+  fi
+
+  etimes="$(ps -o etimes= -p "${pid}" 2>/dev/null | tr -d ' ')"
+  [[ "${etimes}" =~ ^[0-9]+$ ]] || etimes=0
+  start_epoch=$((now - etimes))
+  ((pub_mtime - start_epoch > SCAN_DRIFT_GRACE)) && drift=1
+
+  while IFS= read -r f; do logs+=("${f}"); done < <(
+    fdfind --type f --glob 'scan_issue*.log' "${SCAN_LOG_DIR}" 2>/dev/null | sort | tail -3
+  )
+  if ((${#logs[@]} > 0)) && rg -q -e '\[SELF-CHECK\]' "${logs[@]}" 2>/dev/null; then
+    selfcheck=1
+  fi
+
+  start_iso="$(date -d "@${start_epoch}" '+%Y-%m-%dT%H:%M:%S')"
+  pub_iso="$(date -d "@${pub_mtime}" '+%Y-%m-%dT%H:%M:%S')"
+  printf 'SCANRUNTIME\tpid=%s start=%s published=%s drift=%d selfcheck=%d\n' \
+    "${pid}" "${start_iso}" "${pub_iso}" "${drift}" "${selfcheck}" >>"${TMP_DIR}/findings.txt"
+  if ((drift == 1 && selfcheck == 0)); then
+    printf 'SCANDRIFT\tpid=%s running_since=%s published_mtime=%s selfcheck=0\n' \
+      "${pid}" "${start_iso}" "${pub_iso}" >>"${TMP_DIR}/findings.txt"
+  fi
+}
+
 write_issue() {
   local stamp body
   if compgen -G "${ISSUES_DIR}/*_injection-audit.md" >/dev/null; then
@@ -160,7 +216,7 @@ write_issue() {
     printf '```\n\n## 证据\n\n'
     printf -- '- 明细日志：%s\n' "${LOG_FILE}"
     printf -- '- 窗口：最近 %s 天事件（%s 起）\n' "${WINDOW_DAYS}" "${CUTOFF}"
-    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达\n\n' "${NO_SESSION_ALERT}"
+    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；SCANDRIFT = 发布件新于运行镜像且无自检日志\n\n' "${NO_SESSION_ALERT}"
     printf '## 处置\n\n按本轮审计结论修复根因，修复后删除/归档本 issue；同日不重复创建。\n'
   } >"${body}"
   log ERROR "findings written to ${body}"
@@ -174,6 +230,7 @@ rotate_logs() {
 }
 
 main() {
+  local now_ts marker_ts
   mkdir -p "${LOG_DIR}" "${ISSUES_DIR}" "${ROOT}/.var"
   : >"${LOG_FILE}"
   TMP_DIR="$(mktemp -d "${ROOT}/.var/injection-audit.XXXXXX")"
@@ -189,11 +246,22 @@ main() {
   collect_reminder_counts "${WS_CACHE}"
   summarize_reminders
   summarize_dispatch
+  check_scan_runtime
   cat "${TMP_DIR}/findings.txt" >>"${LOG_FILE}"
 
   if [[ -s "${TMP_DIR}/findings.txt" ]] &&
-    rg -q '^(DROPPED|STALLED)' "${TMP_DIR}/findings.txt"; then
+    rg -q '^(DROPPED|STALLED|SCANSTOPPED)' "${TMP_DIR}/findings.txt"; then
     write_issue
+  elif [[ -s "${TMP_DIR}/findings.txt" ]] &&
+    rg -q '^SCANDRIFT' "${TMP_DIR}/findings.txt"; then
+    now_ts="$(date +%s)"
+    marker_ts="$(stat -c %Y "${SCAN_DRIFT_MARKER}" 2>/dev/null || echo 0)"
+    if ((now_ts - marker_ts >= SCAN_DRIFT_REPORT_DAYS * 86400)); then
+      write_issue
+      touch "${SCAN_DRIFT_MARKER}"
+    else
+      log INFO "scan runtime drift already reported within ${SCAN_DRIFT_REPORT_DAYS}d; log only"
+    fi
   else
     log INFO "no reminder-delivery finding"
   fi
