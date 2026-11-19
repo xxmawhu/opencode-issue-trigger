@@ -146,8 +146,7 @@ summarize_reminders() {
 
 summarize_dispatch() {
   local latest
-  latest="$(fdfind --type f --glob 'scan_issue*.log' "${SCAN_LOG_DIR}" 2>/dev/null |
-    sort | tail -1)"
+  latest="$(newest_scan_log)"
   if [[ -z "${latest}" ]]; then
     log ERROR "no scan_issue log found in ${SCAN_LOG_DIR}"
     return 0
@@ -165,13 +164,29 @@ summarize_dispatch() {
 # Published build vs running image. The process may belong to another user, so
 # only read-only facts are used: /proc start time (etimes) and the published
 # mtime. [SELF-CHECK] log lines prove the new self-check code is running.
+# Log files are named either scan_issueYYYYMMDDHH.log (old) or
+# scan_issue.YYYYMMDDTHH.log (new self-check build), so ordering is by mtime.
+scan_logs_by_mtime() {
+  fdfind --type f --glob 'scan_issue*.log' "${SCAN_LOG_DIR}" 2>/dev/null |
+    xargs -r stat -c '%Y %n' | sort -n | cut -d' ' -f2-
+}
+
+newest_scan_log() {
+  scan_logs_by_mtime | tail -1
+}
+
 # Newest *complete* hourly log: comparing an in-progress hour against a full hour
 # would understate the post-activation rate, so the current hour is excluded.
 newest_complete_scan_log() {
-  local current_hour
+  local current_hour f digits last=""
   current_hour="$(date +%Y%m%d%H)"
-  fdfind --type f --glob 'scan_issue*.log' "${SCAN_LOG_DIR}" 2>/dev/null |
-    sort | rg -v "scan_issue${current_hour}\.log$" | tail -1
+  while IFS= read -r f; do
+    digits="$(basename "${f}")"
+    digits="${digits//[^0-9]/}"
+    [[ "${digits}" == "${current_hour}" ]] && continue
+    last="${f}"
+  done < <(scan_logs_by_mtime)
+  printf '%s' "${last}"
 }
 
 # Probe timeouts are the failure the published fix classifies; new-classification
@@ -189,9 +204,24 @@ scan_log_metric() {
   esac
 }
 
+# Read the first "key=value" line from the drift baseline.
+baseline_field() {
+  local file="$1" key="$2" line value
+  while IFS= read -r line; do
+    case "${line}" in
+    "${key}="*)
+      value="${line#*=}"
+      printf '%s' "${value%% *}"
+      return 0
+      ;;
+    esac
+  done <"${file}"
+  return 1
+}
+
 check_scan_runtime() {
   local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
-  local latest exit124 newclass baseline_new
+  local latest exit124 newclass baseline_new act_epoch latest_hour act_hour
   local -a logs=()
 
   if [[ ! -f "${SCAN_PUBLISHED}" ]]; then
@@ -213,9 +243,7 @@ check_scan_runtime() {
   start_epoch=$((now - etimes))
   ((pub_mtime - start_epoch > SCAN_DRIFT_GRACE)) && drift=1
 
-  while IFS= read -r f; do logs+=("${f}"); done < <(
-    fdfind --type f --glob 'scan_issue*.log' "${SCAN_LOG_DIR}" 2>/dev/null | sort | tail -3
-  )
+  while IFS= read -r f; do logs+=("${f}"); done < <(scan_logs_by_mtime | tail -3)
   if ((${#logs[@]} > 0)) && rg -q -e '\[SELF-CHECK\]' "${logs[@]}" 2>/dev/null; then
     selfcheck=1
   fi
@@ -237,14 +265,32 @@ check_scan_runtime() {
         "${pub_iso}" "${exit124}" "${newclass}" "${latest}" "${start_iso}" >"${baseline_new}"
       mv "${baseline_new}" "${SCAN_DRIFT_BASELINE}"
     fi
-  elif ((drift == 0 && selfcheck == 1)) &&
-    [[ -f "${SCAN_DRIFT_BASELINE}" ]] &&
-    ! rg -q 'activated_at=' "${SCAN_DRIFT_BASELINE}" 2>/dev/null; then
-    # First observation of the activated build: record both sides of the change.
-    printf 'activated_at=%s pid=%s exit124_now=%s newclass_now=%s file=%s\n' \
-      "${start_iso}" "${pid}" "${exit124}" "${newclass}" "${latest}" >>"${SCAN_DRIFT_BASELINE}"
-    printf 'SCANACTIVE\tpid=%s started=%s exit124_now=%s newclass_now=%s baseline=%s\n' \
-      "${pid}" "${start_iso}" "${exit124}" "${newclass}" "${SCAN_DRIFT_BASELINE}" >>"${TMP_DIR}/findings.txt"
+  elif ((drift == 0 && selfcheck == 1)) && [[ -f "${SCAN_DRIFT_BASELINE}" ]]; then
+    act_epoch="$(baseline_field "${SCAN_DRIFT_BASELINE}" activated_at || true)"
+    if [[ -z "${act_epoch}" ]]; then
+      act_epoch="${start_epoch}"
+      printf 'activated_at=%s pid=%s\n' "${act_epoch}" "${pid}" >>"${SCAN_DRIFT_BASELINE}"
+      printf 'SCANACTIVE_PENDING\tpid=%s started=%s note=waiting for a complete post-activation hour\n' \
+        "${pid}" "${start_iso}" >>"${TMP_DIR}/findings.txt"
+    fi
+    if ! baseline_field "${SCAN_DRIFT_BASELINE}" verified_at >/dev/null 2>&1; then
+      latest_hour="$(basename "${latest}")"
+      latest_hour="${latest_hour//[^0-9]/}"
+      act_hour="$(date -d "@${act_epoch}" +%Y%m%d%H)"
+      if [[ -n "${latest_hour}" && -n "${act_hour}" ]] && ((latest_hour >= act_hour)); then
+        # A complete hour that begins with the activated build: same basis as the
+        # baseline hour, so the two numbers are comparable.
+        exit124="$(scan_log_metric "${latest}" exit124)"
+        newclass="$(scan_log_metric "${latest}" newclass)"
+        printf 'verified_at=%s exit124=%s newclass=%s file=%s\n' \
+          "$(date -d "@${now}" '+%Y-%m-%dT%H:%M:%S')" "${exit124}" "${newclass}" "${latest}" \
+          >>"${SCAN_DRIFT_BASELINE}"
+        printf 'SCANACTIVE\tpid=%s started=%s exit124_now=%s newclass_now=%s baseline=%s\n' \
+          "${pid}" "${start_iso}" "${exit124}" "${newclass}" "${SCAN_DRIFT_BASELINE}" >>"${TMP_DIR}/findings.txt"
+      else
+        log INFO "post-activation metrics pending: newest complete hour ${latest_hour:-none} < activation hour ${act_hour}"
+      fi
+    fi
   fi
 }
 
