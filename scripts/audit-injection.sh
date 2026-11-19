@@ -31,6 +31,9 @@ SCAN_DRIFT_MARKER="${ROOT}/.var/scan-drift-last-report"
 # and new-classification hits. After activation the same metrics are emitted once
 # as SCANACTIVE, so "did the new build actually help" needs no manual comparison.
 SCAN_DRIFT_BASELINE="${ROOT}/.var/scan-drift-baseline"
+# Records the newest published fingerprint that the running process already
+# covers, so "the fix is finally live" is a log line instead of a manual diff.
+SCAN_ACTIVATED="${ROOT}/.var/scan-activated"
 # A published build older than the process start is normal; the reverse means the
 # running image predates what is on disk. Ignore a 30-minute window so a build
 # that was just published, and is about to be picked up, is not reported.
@@ -227,6 +230,7 @@ baseline_field() {
 
 check_scan_runtime() {
   local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
+  local recorded
   local latest exit124 newclass baseline_new act_epoch latest_hour act_hour
   local -a logs=()
 
@@ -261,6 +265,21 @@ check_scan_runtime() {
   newclass="$(scan_log_metric "${latest}" newclass)"
   printf 'SCANRUNTIME\tpid=%s start=%s published=%s drift=%d selfcheck=%d\n' \
     "${pid}" "${start_iso}" "${pub_iso}" "${drift}" "${selfcheck}" >>"${TMP_DIR}/findings.txt"
+
+  # A process that already covers the published build (drift=0) with the
+  # self-check code alive means the publish is live. One line per published
+  # fingerprint, so an activation is recorded without anyone comparing hashes.
+  if ((drift == 0 && selfcheck == 1)); then
+    recorded="$(baseline_field "${SCAN_ACTIVATED}" published_epoch 2>/dev/null || true)"
+    if [[ -z "${recorded}" ]] || ((pub_mtime > recorded)); then
+      printf 'published_epoch=%s published=%s pid=%s started=%s at=%s\n' \
+        "${pub_mtime}" "${pub_iso}" "${pid}" "${start_iso}" "$(date -d "@${now}" '+%Y-%m-%dT%H:%M:%S')" \
+        >"${SCAN_ACTIVATED}.tmp.$$" &&
+        mv -f "${SCAN_ACTIVATED}.tmp.$$" "${SCAN_ACTIVATED}"
+      printf 'SCANACTIVATED\tpid=%s started=%s published=%s\n' \
+        "${pid}" "${start_iso}" "${pub_iso}" >>"${TMP_DIR}/findings.txt"
+    fi
+  fi
 
   if ((drift == 1 && selfcheck == 0)); then
     printf 'SCANDRIFT\tpid=%s running_since=%s published_mtime=%s selfcheck=0\n' \
