@@ -22,6 +22,10 @@ SCAN_LOG_DIR="/mnt/beegfs_data/usr/maxx/regular_task/scan_issue/log"
 LOG_DIR="${ROOT}/log"
 LOG_FILE="${LOG_DIR}/injection-audit.$(date +%Y%m%d).log"
 ISSUES_DIR="${ROOT}/issues"
+# Workspace discovery walks two whole user trees (~4min on beegfs), so it is
+# cached and refreshed weekly; the reminder events themselves are re-read daily.
+WS_CACHE="${ROOT}/data/workspaces.txt"
+CACHE_MAX_AGE_DAYS=7
 TMP_DIR=""
 
 # Window in days for "recent" log files and events.
@@ -57,22 +61,40 @@ require_tools() {
   done
 }
 
+# Refresh the workspace list when the cache is missing or older than the
+# retention window. The write is atomic (same directory, mv) so a crashed refresh
+# cannot leave a half list behind.
+discover_workspaces() {
+  mkdir -p "$(dirname "${WS_CACHE}")"
+  if [[ -f "${WS_CACHE}" && "${WS_CACHE}" -nt "${TMP_DIR}/cache-cutoff" ]]; then
+    log INFO "workspace cache fresh: ${WS_CACHE}"
+    return 0
+  fi
+  fdfind --hidden --type d --glob 'opencode-workspaces' --max-depth 8 "${HOME_ROOTS[@]}" \
+    2>/dev/null >"${WS_CACHE}.tmp.$$"
+  mv "${WS_CACHE}.tmp.$$" "${WS_CACHE}"
+  log INFO "workspace cache refreshed: $(wc -l <"${WS_CACHE}") entries"
+}
+
+# Log files sit at two known depths under a workspace; enumerating those globs is
+# O(directories) instead of a full tree walk.
 collect_reminder_counts() {
   local ws_file="$1"
-  local ws_file_count project log_file
-  ws_file_count="$(wc -l <"${ws_file}")"
-  log INFO "workspaces discovered: ${ws_file_count}"
+  local project log_file
+  log INFO "workspaces scanned: $(wc -l <"${ws_file}")"
   while IFS= read -r ws; do
     project="${ws%/.local/share/opencode-workspaces}"
-    while IFS= read -r log_file; do
+    for log_file in "${ws}"/*/opencode/log/*.log \
+      "${ws}"/*/sessions/*/opencode/log/*.log; do
+      [[ -f "${log_file}" ]] || continue
+      [[ "${log_file}" -nt "${TMP_DIR}/cutoff" ]] || continue
       rg --no-filename --no-line-number \
         -e 'message="queued issue injection"' \
         -e 'message="injected issue prompt"' \
         -e 'message="no injectable session yet; issue stays queued"' \
         -e 'message="dropping issue injection"' \
         "${log_file}" 2>/dev/null
-    done < <(fdfind --hidden --type f --changed-within "${WINDOW_DAYS}d" \
-      --glob '*.log' "${ws}" 2>/dev/null) | awk -v cutoff="${CUTOFF}" -v project="${project}" '
+    done | awk -v cutoff="${CUTOFF}" -v project="${project}" '
       {
         match($0, /timestamp=[^ ]+/)
         if (RSTART == 0) next
@@ -116,10 +138,10 @@ summarize_dispatch() {
   awk '
     /probe failed \(exit=124\)/ { t124++ }
     /probe failed \(exit=255\)/ { t255++ }
-    /fail-closed/ { closed++ }
-    /\[PRE-CHECK\] opencode already running/ { running++ }
+    /opencode already running for project/ { running++ }
+    /skipping batch dispatch/ { skipped++ }
     END {
-      printf "DISPATCH\tfile=%s exit124=%d exit255=%d failclosed=%d running=%d\n", FILENAME, t124, t255, closed, running
+      printf "DISPATCH\tfile=%s exit124=%d exit255=%d running=%d skipped=%d\n", FILENAME, t124, t255, running, skipped
     }' "${latest}" >>"${TMP_DIR}/findings.txt"
 }
 
@@ -160,10 +182,11 @@ main() {
 
   require_tools
   log INFO "audit start | window=${WINDOW_DAYS}d cutoff=${CUTOFF}"
+  touch -d "${WINDOW_DAYS} days ago" "${TMP_DIR}/cutoff"
+  touch -d "${CACHE_MAX_AGE_DAYS} days ago" "${TMP_DIR}/cache-cutoff"
 
-  fdfind --hidden --type d --glob 'opencode-workspaces' "${HOME_ROOTS[@]}" \
-    2>/dev/null >"${TMP_DIR}/workspaces.txt"
-  collect_reminder_counts "${TMP_DIR}/workspaces.txt"
+  discover_workspaces
+  collect_reminder_counts "${WS_CACHE}"
   summarize_reminders
   summarize_dispatch
   cat "${TMP_DIR}/findings.txt" >>"${LOG_FILE}"
