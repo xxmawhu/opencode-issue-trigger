@@ -239,8 +239,12 @@ baseline_field() {
 # Answers "would the restart channel load a newer published build?" without
 # assuming it is silent: the channel runs every 5 minutes and may be deciding
 # SKIP on every pass, which keeps a new build unloaded forever.
-read_restart_decision() {
-  local d f newest="" newest_mtime=0 mt line last=""
+# Prints "<decision>\t<newest log mtime>" for the newest restart.sh log across the
+# candidate runtime dirs. The decision word is what the channel would do next;
+# the mtime says whether that decision is recent enough to be about the current
+# publish or a stale run from before it.
+read_restart_state() {
+  local d f newest="" newest_mtime=0 mt line last="" log
   for d in "${SCAN_RESTART_LOG_DIRS[@]}"; do
     [[ -d "${d}" ]] || continue
     # 终止性：不变量 = newest 始终是本轮已见文件中最新的一个；终止量 = fdfind
@@ -255,7 +259,7 @@ read_restart_decision() {
     done < <(fdfind --type f --glob 'restart.sh.*.log' "${d}" 2>/dev/null)
   done
   if [[ -z "${newest}" ]]; then
-    printf 'none'
+    printf 'none\t0'
     return 0
   fi
   while IFS= read -r line; do
@@ -263,23 +267,19 @@ read_restart_decision() {
     *'Decision: '*) last="${line#*Decision: }" ;;
     esac
   done <"${newest}"
-  if [[ -z "${last}" ]]; then
-    printf 'none'
-    return 0
-  fi
-  # Normalize: the raw text carries the parenthesised reason after the word.
   case "${last}" in
-  SKIP*) printf 'SKIP' ;;
-  RESTART*) printf 'RESTART' ;;
-  START*) printf 'START' ;;
-  *) printf 'none' ;;
+  SKIP*) log=SKIP ;;
+  RESTART*) log=RESTART ;;
+  START*) log=START ;;
+  *) log=none ;;
   esac
+  printf '%s\t%s' "${log}" "${newest_mtime}"
 }
 
 check_scan_runtime() {
   local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
   local recorded
-  local latest exit124 newclass baseline_new act_epoch latest_hour act_hour decision
+  local latest exit124 newclass baseline_new act_epoch latest_hour act_hour decision restart_state restart_log_mtime
   local -a logs=()
 
   if [[ ! -f "${SCAN_PUBLISHED}" ]]; then
@@ -319,9 +319,17 @@ check_scan_runtime() {
   # restart breaks the loop. Report it separately so it is never mistaken for a
   # channel that has simply gone quiet.
   if ((drift == 1)); then
-    decision="$(read_restart_decision)"
+    restart_state="$(read_restart_state)"
+    decision="${restart_state%%$'\t'*}"
+    restart_log_mtime="${restart_state##*$'\t'}"
+    [[ "${restart_log_mtime}" =~ ^[0-9]+$ ]] || restart_log_mtime=0
     if [[ "${decision}" == "SKIP" ]]; then
       printf 'RESTARTSKIP\tpid=%s running_since=%s published_mtime=%s decision=%s\n' \
+        "${pid}" "${start_iso}" "${pub_iso}" "${decision}" >>"${TMP_DIR}/findings.txt"
+    # A restart was attempted after this publish and the process still predates
+    # it: the channel is running but cannot complete (cross-user kill, abort).
+    elif [[ "${decision}" == "RESTART" ]] && ((restart_log_mtime > pub_mtime)); then
+      printf 'RESTARTBLOCKED\tpid=%s running_since=%s published_mtime=%s decision=%s\n' \
         "${pid}" "${start_iso}" "${pub_iso}" "${decision}" >>"${TMP_DIR}/findings.txt"
     fi
   fi
@@ -401,7 +409,7 @@ write_issue() {
     printf '```\n\n## 证据\n\n'
     printf -- '- 明细日志：%s\n' "${LOG_FILE}"
     printf -- '- 窗口：最近 %s 天事件（%s 起）\n' "${WINDOW_DAYS}" "${CUTOFF}"
-    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；SCANDRIFT = 发布件新于运行镜像且无自检日志；RESTARTSKIP = 存在漂移且重启通道最后一轮判 SKIP（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}"
+    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；SCANDRIFT = 发布件新于运行镜像且无自检日志；RESTARTSKIP = 漂移且重启通道最后一轮判 SKIP；RESTARTBLOCKED = 发布后重启通道已判 RESTART 但进程仍未切换（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}"
     printf '## 处置\n\n按本轮审计结论修复根因，修复后删除/归档本 issue；同日不重复创建。\n'
   } >"${body}"
   log ERROR "findings written to ${body}"
