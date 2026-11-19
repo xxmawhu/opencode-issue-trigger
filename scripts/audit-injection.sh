@@ -34,6 +34,13 @@ SCAN_DRIFT_BASELINE="${ROOT}/.var/scan-drift-baseline"
 # Records the newest published fingerprint that the running process already
 # covers, so "the fix is finally live" is a log line instead of a manual diff.
 SCAN_ACTIVATED="${ROOT}/.var/scan-activated"
+# Directories that may hold the restart.sh log. The production runtime is the
+# process's own directory; the publisher's cron runs from its project checkout and
+# writes to a second runtime dir, and that is the channel that actually decides.
+SCAN_RESTART_LOG_DIRS=(
+  "/mnt/beegfs_data/usr/maxx/regular_task/scan_issue/log"
+  "/mnt/beegfs_data/usr/maxx/dev/agents-tools/scan-issue/regular_task/scan_issue/log"
+)
 # A published build older than the process start is normal; the reverse means the
 # running image predates what is on disk. Ignore a 30-minute window so a build
 # that was just published, and is about to be picked up, is not reported.
@@ -228,10 +235,51 @@ baseline_field() {
   return 1
 }
 
+# Last decision line of the newest restart.sh log for the scan_issue runtime.
+# Answers "would the restart channel load a newer published build?" without
+# assuming it is silent: the channel runs every 5 minutes and may be deciding
+# SKIP on every pass, which keeps a new build unloaded forever.
+read_restart_decision() {
+  local d f newest="" newest_mtime=0 mt line last=""
+  for d in "${SCAN_RESTART_LOG_DIRS[@]}"; do
+    [[ -d "${d}" ]] || continue
+    # 终止性：不变量 = newest 始终是本轮已见文件中最新的一个；终止量 = fdfind
+    # 输出列表的剩余行数（有限，每轮消费一行，严格递减至 0）。
+    while IFS= read -r f; do
+      [[ -f "${f}" ]] || continue
+      mt="$(stat -c %Y "${f}" 2>/dev/null || echo 0)"
+      if ((mt > newest_mtime)); then
+        newest_mtime=${mt}
+        newest="${f}"
+      fi
+    done < <(fdfind --type f --glob 'restart.sh.*.log' "${d}" 2>/dev/null)
+  done
+  if [[ -z "${newest}" ]]; then
+    printf 'none'
+    return 0
+  fi
+  while IFS= read -r line; do
+    case "${line}" in
+    *'Decision: '*) last="${line#*Decision: }" ;;
+    esac
+  done <"${newest}"
+  if [[ -z "${last}" ]]; then
+    printf 'none'
+    return 0
+  fi
+  # Normalize: the raw text carries the parenthesised reason after the word.
+  case "${last}" in
+  SKIP*) printf 'SKIP' ;;
+  RESTART*) printf 'RESTART' ;;
+  START*) printf 'START' ;;
+  *) printf 'none' ;;
+  esac
+}
+
 check_scan_runtime() {
   local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
   local recorded
-  local latest exit124 newclass baseline_new act_epoch latest_hour act_hour
+  local latest exit124 newclass baseline_new act_epoch latest_hour act_hour decision
   local -a logs=()
 
   if [[ ! -f "${SCAN_PUBLISHED}" ]]; then
@@ -265,6 +313,18 @@ check_scan_runtime() {
   newclass="$(scan_log_metric "${latest}" newclass)"
   printf 'SCANRUNTIME\tpid=%s start=%s published=%s drift=%d selfcheck=%d\n' \
     "${pid}" "${start_iso}" "${pub_iso}" "${drift}" "${selfcheck}" >>"${TMP_DIR}/findings.txt"
+
+  # Drift plus a restart channel that keeps answering SKIP is a dead end: the
+  # publish cannot become live by itself, and only an owner-side fix or a manual
+  # restart breaks the loop. Report it separately so it is never mistaken for a
+  # channel that has simply gone quiet.
+  if ((drift == 1)); then
+    decision="$(read_restart_decision)"
+    if [[ "${decision}" == "SKIP" ]]; then
+      printf 'RESTARTSKIP\tpid=%s running_since=%s published_mtime=%s decision=%s\n' \
+        "${pid}" "${start_iso}" "${pub_iso}" "${decision}" >>"${TMP_DIR}/findings.txt"
+    fi
+  fi
 
   # A process that already covers the published build (drift=0) with the
   # self-check code alive means the publish is live. One line per published
@@ -341,7 +401,7 @@ write_issue() {
     printf '```\n\n## 证据\n\n'
     printf -- '- 明细日志：%s\n' "${LOG_FILE}"
     printf -- '- 窗口：最近 %s 天事件（%s 起）\n' "${WINDOW_DAYS}" "${CUTOFF}"
-    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；SCANDRIFT = 发布件新于运行镜像且无自检日志\n\n' "${NO_SESSION_ALERT}"
+    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；SCANDRIFT = 发布件新于运行镜像且无自检日志；RESTARTSKIP = 存在漂移且重启通道最后一轮判 SKIP（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}"
     printf '## 处置\n\n按本轮审计结论修复根因，修复后删除/归档本 issue；同日不重复创建。\n'
   } >"${body}"
   log ERROR "findings written to ${body}"
@@ -448,6 +508,10 @@ main() {
   if [[ -s "${TMP_DIR}/findings.txt" ]] &&
     rg -q '^(DROPPED|STALLED|SCANSTOPPED)' "${TMP_DIR}/findings.txt"; then
     write_issue
+  # RESTARTSKIP is deliberately log-only: its root cause lives in the publishing
+  # project's restart.sh, so filing it against this project would put the report
+  # in the wrong place. The drift clause below still covers the missing-self-check
+  # case that this project can act on.
   elif [[ -s "${TMP_DIR}/findings.txt" ]] &&
     rg -q '^SCANDRIFT' "${TMP_DIR}/findings.txt"; then
     now_ts="$(date +%s)"
