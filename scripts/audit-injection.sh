@@ -27,6 +27,10 @@ HOME_ROOTS=(/mnt/beegfs_data/usr/maxx/dev /mnt/beegfs_data/usr/maxx/quant)
 SCAN_LOG_DIR="/mnt/beegfs_data/usr/maxx/regular_task/scan_issue/log"
 SCAN_PUBLISHED="/data/alpha/share/scan_issue/scan_issue"
 SCAN_DRIFT_MARKER="${ROOT}/.var/scan-drift-last-report"
+# Baseline captured the first time drift is seen: the hourly probe-timeout count
+# and new-classification hits. After activation the same metrics are emitted once
+# as SCANACTIVE, so "did the new build actually help" needs no manual comparison.
+SCAN_DRIFT_BASELINE="${ROOT}/.var/scan-drift-baseline"
 # A published build older than the process start is normal; the reverse means the
 # running image predates what is on disk. Ignore a 30-minute window so a build
 # that was just published, and is about to be picked up, is not reported.
@@ -161,8 +165,33 @@ summarize_dispatch() {
 # Published build vs running image. The process may belong to another user, so
 # only read-only facts are used: /proc start time (etimes) and the published
 # mtime. [SELF-CHECK] log lines prove the new self-check code is running.
+# Newest *complete* hourly log: comparing an in-progress hour against a full hour
+# would understate the post-activation rate, so the current hour is excluded.
+newest_complete_scan_log() {
+  local current_hour
+  current_hour="$(date +%Y%m%d%H)"
+  fdfind --type f --glob 'scan_issue*.log' "${SCAN_LOG_DIR}" 2>/dev/null |
+    sort | rg -v "scan_issue${current_hour}\.log$" | tail -1
+}
+
+# Probe timeouts are the failure the published fix classifies; new-classification
+# strings prove the new build is the one writing them.
+scan_log_metric() {
+  local file="$1" field="$2"
+  if [[ ! -f "${file}" ]]; then
+    printf '0'
+    return 0
+  fi
+  case "${field}" in
+  exit124) awk '/probe failed \(exit=124\)/ { n++ } END { print n+0 }' "${file}" ;;
+  newclass) awk '/probe-expired|ssh-unreachable/ { n++ } END { print n+0 }' "${file}" ;;
+  *) printf '0' ;;
+  esac
+}
+
 check_scan_runtime() {
   local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
+  local latest exit124 newclass baseline_new
   local -a logs=()
 
   if [[ ! -f "${SCAN_PUBLISHED}" ]]; then
@@ -193,11 +222,29 @@ check_scan_runtime() {
 
   start_iso="$(date -d "@${start_epoch}" '+%Y-%m-%dT%H:%M:%S')"
   pub_iso="$(date -d "@${pub_mtime}" '+%Y-%m-%dT%H:%M:%S')"
+  latest="$(newest_complete_scan_log)"
+  exit124="$(scan_log_metric "${latest}" exit124)"
+  newclass="$(scan_log_metric "${latest}" newclass)"
   printf 'SCANRUNTIME\tpid=%s start=%s published=%s drift=%d selfcheck=%d\n' \
     "${pid}" "${start_iso}" "${pub_iso}" "${drift}" "${selfcheck}" >>"${TMP_DIR}/findings.txt"
+
   if ((drift == 1 && selfcheck == 0)); then
     printf 'SCANDRIFT\tpid=%s running_since=%s published_mtime=%s selfcheck=0\n' \
       "${pid}" "${start_iso}" "${pub_iso}" >>"${TMP_DIR}/findings.txt"
+    if [[ ! -f "${SCAN_DRIFT_BASELINE}" ]]; then
+      baseline_new="${SCAN_DRIFT_BASELINE}.tmp.$$"
+      printf 'published_mtime=%s exit124=%s newclass=%s file=%s at=%s\n' \
+        "${pub_iso}" "${exit124}" "${newclass}" "${latest}" "${start_iso}" >"${baseline_new}"
+      mv "${baseline_new}" "${SCAN_DRIFT_BASELINE}"
+    fi
+  elif ((drift == 0 && selfcheck == 1)) &&
+    [[ -f "${SCAN_DRIFT_BASELINE}" ]] &&
+    ! rg -q 'activated_at=' "${SCAN_DRIFT_BASELINE}" 2>/dev/null; then
+    # First observation of the activated build: record both sides of the change.
+    printf 'activated_at=%s pid=%s exit124_now=%s newclass_now=%s file=%s\n' \
+      "${start_iso}" "${pid}" "${exit124}" "${newclass}" "${latest}" >>"${SCAN_DRIFT_BASELINE}"
+    printf 'SCANACTIVE\tpid=%s started=%s exit124_now=%s newclass_now=%s baseline=%s\n' \
+      "${pid}" "${start_iso}" "${exit124}" "${newclass}" "${SCAN_DRIFT_BASELINE}" >>"${TMP_DIR}/findings.txt"
   fi
 }
 
