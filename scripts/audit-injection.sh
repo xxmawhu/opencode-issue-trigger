@@ -278,6 +278,13 @@ check_scan_runtime() {
         mv -f "${SCAN_ACTIVATED}.tmp.$$" "${SCAN_ACTIVATED}"
       printf 'SCANACTIVATED\tpid=%s started=%s published=%s\n' \
         "${pid}" "${start_iso}" "${pub_iso}" >>"${TMP_DIR}/findings.txt"
+      # The activation is the payoff of the whole drift chain; leave one line in
+      # memory so the fix's arrival is visible without reading this log.
+      if [[ -d "${ROOT}/memory" ]]; then
+        printf '\n## scan_issue 激活记录（自动，%s）\n\n- pid=%s started=%s published=%s\n' \
+          "$(date -d "@${now}" '+%Y-%m-%dT%H:%M:%S')" "${pid}" "${start_iso}" "${pub_iso}" \
+          >>"${ROOT}/memory/overall.md"
+      fi
     fi
   fi
 
