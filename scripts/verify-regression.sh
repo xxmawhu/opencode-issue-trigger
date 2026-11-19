@@ -94,6 +94,11 @@ v2_round() {
 
 main() {
   [[ -x "${V1}" ]] || fail start "v1 可执行文件不存在: ${V1}"
+  # `debug info` exists only on the 1.x host, so it doubles as a generation
+  # probe. Since 2026-11-18 /usr/local/bin/opencode is 2.x, so refuse to run the
+  # v1 rounds against it instead of silently testing the wrong generation.
+  "${V1}" debug info >/dev/null 2>&1 ||
+    fail start "${V1} 不支持 debug info（疑似 2.x 宿主），请用 OPENCODE_V1 指定 1.x 二进制"
   setup_sandbox
   run_install copy
   run_install link --link

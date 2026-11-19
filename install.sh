@@ -253,9 +253,19 @@ verify_contents() {
 # shared config directory).
 verify_plugin_list() {
   local stage="verify-list"
-  local output
+  local output version major
   if ! command -v opencode >/dev/null 2>&1; then
     log INFO "${stage}" "PATH 中无 opencode，跳过插件列表检查"
+    return 0
+  fi
+  # opencode 2.x dropped `debug info`; only the 1.x host can print the plugin
+  # list. Probe the major version so a 2.x host skips the assertion instead of
+  # failing the install on an unknown subcommand (host v2.3.2, 2026-11-19).
+  version="$(opencode --version 2>/dev/null | head -1 || true)"
+  major="$(printf '%s\n' "${version}" |
+    awk 'match($0, /[0-9]+/) { print substr($0, RSTART, RLENGTH); exit }')"
+  if [[ -n "${major}" ]] && (( major >= 2 )); then
+    log INFO "${stage}" "opencode ${version} 无 debug info 子命令，跳过插件列表检查"
     return 0
   fi
   if ! output="$(timeout 60 opencode debug info 2>&1)"; then

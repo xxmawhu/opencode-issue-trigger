@@ -101,7 +101,7 @@ bash install.sh
 
 安装选项：
 
-- `bash install.sh`：复制安装，并做静态自检（已装文件与仓库逐文件比对、宿主插件列表包含 issue-trigger）。
+- `bash install.sh`：复制安装，并做静态自检（已装文件与仓库逐文件比对；宿主为 1.x 时再核对插件列表包含 issue-trigger，2.x 无 `debug info` 子命令则跳过该断言）。
 - `bash install.sh --link`：开发期符号链接安装，入口与共享库指向当前仓库，改代码无需重装。
 - `bash install.sh --verify`：在静态自检之外追加加载断言——启动一次宿主进程，要求日志出现 `issue-trigger loaded` 且无 `failed to load plugin`。
 
