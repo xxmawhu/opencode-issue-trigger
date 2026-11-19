@@ -51,6 +51,12 @@ WINDOW_DAYS=2
 # single injection in the window is reported: the reminder is not being delivered.
 NO_SESSION_ALERT=12
 RETAIN_DAYS=30
+# 30-day observation window for the reminder-queue fix. A WEEKLY aggregate is
+# written every 7th day, and one VERDICT is written on the closing day, so the
+# observation completes through the same cron entry with no manual step.
+OBSERVE_START="2026-11-19"
+OBSERVE_END="2026-12-19"
+OBSERVE_FINAL_MARKER="${ROOT}/.var/observation-verdict"
 
 log() {
   local level="$1"
@@ -315,6 +321,74 @@ write_issue() {
   log ERROR "findings written to ${body}"
 }
 
+# 30-day observation bookkeeping. Emits a WEEKLY aggregate every 7 days and one
+# VERDICT on the closing day, so the observation runs to completion through the
+# daily cron entry. Counters come from the per-day audit logs themselves; a day
+# with a DROPPED/STALLED line is a delivery failure by definition.
+periodic_report() {
+  local today days f d n dropped stalled drift stopped verdict start_num
+  local now_epoch start_epoch elapsed
+  today="$(date +%Y-%m-%d)"
+  start_num="$(date -d "${OBSERVE_START}" +%Y%m%d)"
+  now_epoch="$(date -d "${today}" +%s)"
+  start_epoch="$(date -d "${OBSERVE_START}" +%s)"
+  elapsed=$((now_epoch - start_epoch))
+  # Integer days; negative before the window opens, which is the no-op branch.
+  days=$((elapsed / 86400))
+  ((days > 0)) || return 0
+
+  n=0 dropped=0 stalled=0 drift=0 stopped=0
+  # 终止性：输入是 fdfind 的有限文件列表，每轮消费一行，循环必然结束。
+  while IFS= read -r f; do
+    d="$(basename "${f}")"
+    d="${d//[^0-9]/}"
+    [[ -n "${d}" ]] || continue
+    ((10#${d} >= 10#${start_num})) || continue
+    n=$((n + 1))
+    # Day-level flags, not line counts: several audit runs per day must not
+    # inflate the number of failing days.
+    if rg -q '^DROPPED' "${f}" 2>/dev/null; then dropped=$((dropped + 1)); fi
+    if rg -q '^STALLED' "${f}" 2>/dev/null; then stalled=$((stalled + 1)); fi
+    if rg -q '^SCANDRIFT' "${f}" 2>/dev/null; then drift=$((drift + 1)); fi
+    if rg -q '^SCANSTOPPED' "${f}" 2>/dev/null; then stopped=$((stopped + 1)); fi
+  done < <(fdfind --type f --glob 'injection-audit.*.log' "${LOG_DIR}" 2>/dev/null | sort)
+
+  if ((days % 7 == 0)); then
+    printf 'WEEKLY\tday=%s audited_days=%s bad_days_dropped=%s bad_days_stalled=%s bad_days_drift=%s bad_days_stopped=%s\n' \
+      "${days}" "${n}" "${dropped}" "${stalled}" "${drift}" "${stopped}" >>"${LOG_FILE}"
+  fi
+
+  # ISO dates compare correctly as strings (YYYY-MM-DD), so ">=" is date order.
+  if [[ "${today}" == "${OBSERVE_END}" || "${today}" > "${OBSERVE_END}" ]] &&
+    [[ ! -f "${OBSERVE_FINAL_MARKER}" ]]; then
+    if ((dropped == 0 && stalled == 0 && stopped == 0)); then
+      verdict=PASS
+    else
+      verdict=FAIL
+    fi
+    printf 'VERDICT\tverdict=%s end=%s audited_days=%s bad_days_dropped=%s bad_days_stalled=%s bad_days_drift=%s bad_days_stopped=%s\n' \
+      "${verdict}" "${OBSERVE_END}" "${n}" "${dropped}" "${stalled}" "${drift}" "${stopped}" \
+      >>"${LOG_FILE}"
+    # Atomic marker: a half-written state file would look like "not yet done"
+    # and re-emit the verdict; tmp lives in the same directory as the target.
+    printf 'verdict=%s at=%s audited_days=%s bad_days_dropped=%s bad_days_stalled=%s bad_days_drift=%s bad_days_stopped=%s\n' \
+      "${verdict}" "${today}" "${n}" "${dropped}" "${stalled}" "${drift}" "${stopped}" \
+      >"${OBSERVE_FINAL_MARKER}.tmp.$$" &&
+      mv -f "${OBSERVE_FINAL_MARKER}.tmp.$$" "${OBSERVE_FINAL_MARKER}"
+    # The observation's closing note belongs with the other conclusions, and the
+    # cron run is the only actor at that point, so append directly.
+    if [[ -d "${ROOT}/memory" ]]; then
+      {
+        printf '\n## 2026-11-19 issue 注入链路 30 天观察结论（%s，自动生成）\n\n' "${today}"
+        printf -- '- 判定：%s（窗口 %s → %s）\n' "${verdict}" "${OBSERVE_START}" "${OBSERVE_END}"
+        printf -- '- 样本：%s 个审计日；丢弃日 %s、停滞日 %s、运行态停止日 %s、漂移日 %s\n' \
+          "${n}" "${dropped}" "${stalled}" "${stopped}" "${drift}"
+        printf -- '- 证据：`%s`、`%s`\n' "${LOG_FILE}" "${OBSERVE_FINAL_MARKER}"
+      } >>"${ROOT}/memory/overall.md"
+    fi
+  fi
+}
+
 rotate_logs() {
   fdfind --type f --glob 'injection-audit.*.log' --changed-before "${RETAIN_DAYS}d" \
     "${LOG_DIR}" 2>/dev/null | while IFS= read -r old; do
@@ -325,7 +399,10 @@ rotate_logs() {
 main() {
   local now_ts marker_ts
   mkdir -p "${LOG_DIR}" "${ISSUES_DIR}" "${ROOT}/.var"
-  : >"${LOG_FILE}"
+  # Append, not truncate: several manual runs per day are normal and the earlier
+  # blocks are the evidence for what changed. Retention is bounded by rotate_logs.
+  if [[ ! -f "${LOG_FILE}" ]]; then : >"${LOG_FILE}"; fi
+  printf '\n=== audit run %s ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"${LOG_FILE}"
   TMP_DIR="$(mktemp -d "${ROOT}/.var/injection-audit.XXXXXX")"
   CUTOFF="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%dT%H:%M)"
   export CUTOFF
@@ -359,6 +436,7 @@ main() {
     log INFO "no reminder-delivery finding"
   fi
 
+  periodic_report
   rotate_logs
   log INFO "audit done"
 }
