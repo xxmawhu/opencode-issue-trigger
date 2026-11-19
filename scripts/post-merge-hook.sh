@@ -23,6 +23,6 @@ if bash "${PROJECT_ROOT}/install.sh" >>"${LOG_FILE}" 2>&1; then
   exit 0
 fi
 
-log FAIL "post-merge" "reinstall failed; see log/install.$(date +%Y%m%d).log"
-printf '❌ issue-trigger reinstall（详见 log/post-merge-hook.%s.log）\n' "$(date +%Y%m%d)"
+log FAIL "post-merge" "reinstall failed; see log/install.$(date +%Y%m%dT%H).log"
+printf '❌ issue-trigger reinstall（详见 log/post-merge-hook.%s.log）\n' "$(date +%Y%m%dT%H)"
 exit 0

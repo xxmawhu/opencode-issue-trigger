@@ -29,7 +29,7 @@ log() {
 
 die() {
   log ERROR "$1" "$2"
-  printf '❌ %s（详见 log/install.%s.log）\n' "$2" "$(date +%Y%m%d)"
+  printf '❌ %s（详见 log/install.%s.log）\n' "$2" "$(date +%Y%m%dT%H)"
   exit 1
 }
 
@@ -126,7 +126,7 @@ ensure_dir_traversable "${OPENCODE_DIR}/plugin"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"${LOG_DIR}/install.lock"
   if ! flock -n 9; then
-    printf '❌ 另一个 install.sh 正在运行（详见 log/install.%s.log）\n' "$(date +%Y%m%d)"
+    printf '❌ 另一个 install.sh 正在运行（详见 log/install.%s.log）\n' "$(date +%Y%m%dT%H)"
     exit 1
   fi
 fi
@@ -139,7 +139,14 @@ replace_dir() {
   rm -rf "${tmp}" "${old}"
   mkdir -p "${tmp}"
   CLEANUP_TARGET="${tmp}"
-  cp -R "${src}/." "${tmp}/"
+  # cp stderr goes to the log: without it a read-only or full target filesystem
+  # aborts under `set -e` leaving only `[stage:start]` in the log and no cause
+  # (observed 2026-11-19 14:43 on a read-only config dir).
+  if ! cp -R "${src}/." "${tmp}/" 2>>"${LOG_FILE}"; then
+    CLEANUP_TARGET=""
+    rm -rf "${tmp}"
+    die "install-plugin" "复制 ${src} 失败"
+  fi
   # Normalize and verify before publishing so a bad tree never replaces a good one.
   normalize_permissions "${tmp}"
   verify_tree "install-plugin" "${tmp}"
@@ -156,7 +163,11 @@ install_file() {
   local dst="$2"
   local tmp="${dst}.tmp.$$"
   CLEANUP_TARGET="${tmp}"
-  cp "${src}" "${tmp}"
+  if ! cp "${src}" "${tmp}" 2>>"${LOG_FILE}"; then
+    CLEANUP_TARGET=""
+    rm -f "${tmp}"
+    die "install-plugin" "复制 ${src} 失败"
+  fi
   chmod 0644 "${tmp}"
   mv "${tmp}" "${dst}"
   CLEANUP_TARGET=""
@@ -371,7 +382,7 @@ main() {
   install_hooks
   verify_load
   log PASS "done" "安装完成"
-  printf '✅ opencode-issue-trigger installed（日志 log/install.%s.log）\n' "$(date +%Y%m%d)"
+  printf '✅ opencode-issue-trigger installed（日志 log/install.%s.log）\n' "$(date +%Y%m%dT%H)"
 }
 
 main "$@"

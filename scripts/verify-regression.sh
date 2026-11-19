@@ -28,7 +28,7 @@ log() {
 
 fail() {
   log FAIL "$1" "$2"
-  printf '❌ %s: %s（详见 log/verify-regression.%s.log）\n' "$1" "$2" "$(date +%Y%m%d)"
+  printf '❌ %s: %s（详见 log/verify-regression.%s.log）\n' "$1" "$2" "$(date +%Y%m%dT%H)"
   exit 1
 }
 
@@ -122,7 +122,7 @@ main() {
   fi
 
   log PASS done "回归链通过（${ROUNDS} 轮 v1${V2:+ + ${ROUNDS} 轮 v2}）"
-  printf '✅ 回归链通过（日志 log/verify-regression.%s.log）\n' "$(date +%Y%m%d)"
+  printf '✅ 回归链通过（日志 log/verify-regression.%s.log）\n' "$(date +%Y%m%dT%H)"
 }
 
 main "$@"
