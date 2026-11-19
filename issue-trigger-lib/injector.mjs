@@ -1,4 +1,15 @@
-// Serial prompt injection queue with bounded retries. An issue path is injected once.
+// Serial prompt injection queue. An issue path is injected once per process and
+// stays queued until a session can take it; it is dropped only when the issue
+// file itself disappears.
+//
+// The queue used to drop an item after 30 idle minutes ("expired"). That lost
+// reminders outright: 120 such drops were recorded across AI users, all of them
+// issues that never reached a session (2026-11-09..16), and alg-trader-n2 then
+// re-dispatched the same file every 30 minutes in a loop. Waiting costs nothing
+// — the reminder is still the truth (the file is still unhandled) — so the age
+// check only emits a periodic warning now.
+import { existsSync } from "node:fs";
+
 const DEFAULT_MAX_AGE_MS = 30 * 60 * 1000;
 const NO_SESSION_RETRY_MS = 5000;
 const BUSY_RETRY_MS = [2000, 5000, 10000, 30000, 60000];
@@ -11,6 +22,7 @@ export function createInjector({
   maxAgeMs = DEFAULT_MAX_AGE_MS,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
+  fileExists = (path) => existsSync(path),
   now = () => Date.now(),
 } = {}) {
   const queue = [];
@@ -52,9 +64,22 @@ export function createInjector({
       // queue.length 严格递减且下界为 0，故有限步内必然终止。
       while (queue.length > 0) {
         const item = queue[0];
-        if (now() - item.createdAt > maxAgeMs) {
-          drop(item, "expired");
+        if (!fileExists(item.path)) {
+          // The user handled it (moved to plan/, archived, deleted): nothing to remind.
+          drop(item, "issue file removed");
           continue;
+        }
+        if (now() - item.createdAt > maxAgeMs) {
+          // Still unhandled and still waiting. Report once per window instead of
+          // dropping, so a long busy period delays the reminder but never loses it.
+          item.createdAt = now();
+          // [log-review] 预期内：整段时间没有可注入的空闲会话；降级原因：提醒保留在队列，
+          // 会话一空闲即注入；影响范围：仅提醒延迟，不丢任务。
+          logger?.warn("issue reminder still waiting for an idle session", {
+            path: item.path,
+            attempts: item.attempts,
+            waitedMs: maxAgeMs,
+          });
         }
         let sessionID;
         try {

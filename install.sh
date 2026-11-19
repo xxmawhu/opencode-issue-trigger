@@ -261,15 +261,28 @@ verify_plugin_list() {
   # opencode 2.x dropped `debug info`; only the 1.x host can print the plugin
   # list. Probe the major version so a 2.x host skips the assertion instead of
   # failing the install on an unknown subcommand (host v2.3.2, 2026-11-19).
+  # Version output is logged unconditionally: installs on other servers report
+  # only the log, so a silent detection failure is otherwise undiagnosable
+  # (compute-server-98-7, 2026-11-19 06:22:08 failed here with no version line).
   version="$(opencode --version 2>/dev/null | head -1 || true)"
+  log INFO "${stage}" "opencode 版本：${version:-<未输出>}"
   major="$(printf '%s\n' "${version}" |
     awk 'match($0, /[0-9]+/) { print substr($0, RSTART, RLENGTH); exit }')"
   if [[ -n "${major}" ]] && (( major >= 2 )); then
-    log INFO "${stage}" "opencode ${version} 无 debug info 子命令，跳过插件列表检查"
+    log INFO "${stage}" "宿主 ${version} 无 debug info 子命令，跳过插件列表检查"
     return 0
   fi
+  # `debug info` is an informational listing, not the install assertion: the
+  # installed tree is already byte-compared by verify-contents and, with
+  # --verify, loaded by a real host process. A host whose CLI lacks the
+  # subcommand (or whose version line was unparseable) must not abort the
+  # install, or every such server stays on the previous plugin build.
   if ! output="$(timeout 60 opencode debug info 2>&1)"; then
-    die "${stage}" "opencode debug info 执行失败"
+    # [bash-review] 预期内：宿主 CLI 能力差异（无 debug info / 版本行不可解析）；
+    # 降级原因：安装内容已由 verify-contents + 可选 verify-load 断言；
+    # 影响范围：仅少一次插件列表展示，不回滚已安装文件。
+    log WARN "${stage}" "opencode debug info 不可用，跳过插件列表检查（安装内容已由 verify-contents 校验）：${output%%$'\n'*}"
+    return 0
   fi
   [[ "${output}" == *issue-trigger* ]] ||
     die "${stage}" "opencode debug info 未列出 issue-trigger"
