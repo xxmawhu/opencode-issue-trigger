@@ -5,7 +5,7 @@
 # Zero-argument and cron-safe: every path and threshold below is the default, so
 # the crontab entry stays "absolute command + log redirect" with no parameters.
 #
-# What it answers, once per day, in log/injection-audit.YYYYMMDD.log:
+# What it answers, once per day, in log/injection-audit.YYYYMMDDTHH.log:
 #   1. reminder queue health: queued / injected / no-session / dropped per project
 #   2. findings: projects that dropped a reminder, or waited for a session and
 #      never injected it inside the window
@@ -47,7 +47,7 @@ SCAN_RESTART_LOG_DIRS=(
 SCAN_DRIFT_GRACE=1800
 SCAN_DRIFT_REPORT_DAYS=7
 LOG_DIR="${ROOT}/log"
-LOG_FILE="${LOG_DIR}/injection-audit.$(date +%Y%m%d).log"
+LOG_FILE="${LOG_DIR}/injection-audit.$(date +%Y%m%dT%H).log"
 ISSUES_DIR="${ROOT}/issues"
 # Workspace discovery walks two whole user trees (~4min on beegfs), so it is
 # cached and refreshed weekly; the reminder events themselves are re-read daily.
@@ -432,20 +432,30 @@ periodic_report() {
   ((days > 0)) || return 0
 
   n=0 dropped=0 stalled=0 drift=0 stopped=0
+  # Hourly log files: several files share one date, so failures are accumulated
+  # per date first. Counting files would turn one bad day into 24 bad days.
+  declare -A day_seen=() bad_dropped=() bad_stalled=() bad_drift=() bad_stopped=()
   # 终止性：输入是 fdfind 的有限文件列表，每轮消费一行，循环必然结束。
   while IFS= read -r f; do
     d="$(basename "${f}")"
+    # Both injection-audit.YYYYMMDD.log (older runs) and
+    # injection-audit.YYYYMMDDTHH.log (hourly) resolve to the same date key.
+    d="${d#injection-audit.}"
+    d="${d%%T*}"
     d="${d//[^0-9]/}"
     [[ -n "${d}" ]] || continue
     ((10#${d} >= 10#${start_num})) || continue
-    n=$((n + 1))
-    # Day-level flags, not line counts: several audit runs per day must not
-    # inflate the number of failing days.
-    if rg -q '^DROPPED' "${f}" 2>/dev/null; then dropped=$((dropped + 1)); fi
-    if rg -q '^STALLED' "${f}" 2>/dev/null; then stalled=$((stalled + 1)); fi
-    if rg -q '^SCANDRIFT' "${f}" 2>/dev/null; then drift=$((drift + 1)); fi
-    if rg -q '^SCANSTOPPED' "${f}" 2>/dev/null; then stopped=$((stopped + 1)); fi
+    day_seen["${d}"]=1
+    if rg -q '^DROPPED' "${f}" 2>/dev/null; then bad_dropped["${d}"]=1; fi
+    if rg -q '^STALLED' "${f}" 2>/dev/null; then bad_stalled["${d}"]=1; fi
+    if rg -q '^SCANDRIFT' "${f}" 2>/dev/null; then bad_drift["${d}"]=1; fi
+    if rg -q '^SCANSTOPPED' "${f}" 2>/dev/null; then bad_stopped["${d}"]=1; fi
   done < <(fdfind --type f --glob 'injection-audit.*.log' "${LOG_DIR}" 2>/dev/null | sort)
+  n=${#day_seen[@]}
+  dropped=${#bad_dropped[@]}
+  stalled=${#bad_stalled[@]}
+  drift=${#bad_drift[@]}
+  stopped=${#bad_stopped[@]}
 
   if ((days % 7 == 0)); then
     printf 'WEEKLY\tday=%s audited_days=%s bad_days_dropped=%s bad_days_stalled=%s bad_days_drift=%s bad_days_stopped=%s\n' \

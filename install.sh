@@ -12,7 +12,7 @@ umask 022
 PROJECT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 OPENCODE_DIR="${HOME}/.config/opencode"
 LOG_DIR="${PROJECT_ROOT}/log"
-LOG_FILE="${LOG_DIR}/install.$(date +%Y%m%d).log"
+LOG_FILE="${LOG_DIR}/install.$(date +%Y%m%dT%H).log"
 CLEANUP_TARGET=""
 LINK_MODE=0
 VERIFY_RUNTIME=0

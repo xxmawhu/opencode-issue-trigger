@@ -117,7 +117,7 @@ OPENCODE_V2=/path/to/opencode2 bash scripts/verify-regression.sh   # 追加 v2 �
 OPENCODE_V1=/path/to/opencode bash scripts/verify-regression.sh     # 覆盖 v1 路径
 ```
 
-脚本把完整过程写入 `log/verify-regression.YYYYMMDD.log`，屏幕只输出每步 ✅/❌。
+脚本把完整过程写入 `log/verify-regression.YYYYMMDDTHH.log`（按小时一个文件），屏幕只输出每步 ✅/❌。
 
 ## 自动更新
 

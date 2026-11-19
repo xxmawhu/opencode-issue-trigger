@@ -13,7 +13,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 SANDBOX="${ROOT}/.var/verify-regression"
 LOG_DIR="${ROOT}/log"
-LOG_FILE="${LOG_DIR}/verify-regression.$(date +%Y%m%d).log"
+LOG_FILE="${LOG_DIR}/verify-regression.$(date +%Y%m%dT%H).log"
 V1="${OPENCODE_V1:-/usr/local/bin/opencode}"
 V2="${OPENCODE_V2:-}"
 ROUNDS="${ROUNDS:-3}"

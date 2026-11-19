@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # post-merge hook: reinstall the plugin after git pull.
-# Screen output stays minimal; the full trace goes to log/post-merge-hook.YYYYMMDD.log.
+# Screen output stays minimal; the full trace goes to log/post-merge-hook.YYYYMMDDTHH.log.
 set -uo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 LOG_DIR="${PROJECT_ROOT}/log"
-LOG_FILE="${LOG_DIR}/post-merge-hook.$(date +%Y%m%d).log"
+LOG_FILE="${LOG_DIR}/post-merge-hook.$(date +%Y%m%dT%H).log"
 mkdir -p "${LOG_DIR}"
 
 log() {
