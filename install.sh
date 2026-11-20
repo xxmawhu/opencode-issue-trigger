@@ -259,6 +259,35 @@ verify_contents() {
   log PASS "${stage}" "已装文件与仓库一致（1 入口 + ${count} 库文件）"
 }
 
+# Two config trees are easy to confuse: `$HOME` may differ from the account's
+# passwd home (agent sessions, hooks, container runs), and a host only reads the
+# config under the HOME it was started with. compute-server-98-7 installed into
+# /mnt/beegfs_data/usr/maxx/.config/opencode at 06:22 and /home/maxx/.config/
+# opencode at 06:41, both logging "installed", while only one of them was live.
+# Warn when a second, different install exists so the mismatch reaches the log.
+verify_single_install() {
+  local stage="verify-home"
+  local account_home other
+  account_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  if [[ -z "${account_home}" ]]; then
+    log INFO "${stage}" "无法解析账户 home，跳过重复安装检查"
+    return 0
+  fi
+  other="${account_home}/.config/opencode/plugin/issue-trigger.ts"
+  if [[ "${OPENCODE_DIR}" == "${account_home}/.config/opencode" || ! -e "${other}" ]]; then
+    log INFO "${stage}" "安装目录 ${OPENCODE_DIR} 无同名第二份安装"
+    return 0
+  fi
+  if cmp -s "${PROJECT_ROOT}/plugin/issue-trigger.ts" "${other}"; then
+    log INFO "${stage}" "账户 home 下存在内容相同的另一份安装：${other}"
+    return 0
+  fi
+  # [log-review] 预期内：同一台机器用不同 HOME 安装过两次，属环境差异而非安装缺陷；
+  # 降级原因：本次安装自身完整，宿主读取哪一份取决于启动时的 HOME；
+  # 影响范围：仅提示，不回滚已安装文件。
+  log WARN "${stage}" "本次安装到 ${OPENCODE_DIR}，但账户 home 下另有一份内容不同的安装 ${other}；宿主以 HOME=${account_home} 启动时读取后者"
+}
+
 # Post-install self-check step 2: the host must list the plugin. Skipped when no
 # `opencode` binary is on PATH (installers may run on hosts that only serve the
 # shared config directory).
@@ -289,7 +318,7 @@ verify_plugin_list() {
   # subcommand (or whose version line was unparseable) must not abort the
   # install, or every such server stays on the previous plugin build.
   if ! output="$(timeout 60 opencode debug info 2>&1)"; then
-    # [bash-review] 预期内：宿主 CLI 能力差异（无 debug info / 版本行不可解析）；
+    # [log-review] 预期内：宿主 CLI 能力差异（无 debug info / 版本行不可解析）；
     # 降级原因：安装内容已由 verify-contents + 可选 verify-load 断言；
     # 影响范围：仅少一次插件列表展示，不回滚已安装文件。
     log WARN "${stage}" "opencode debug info 不可用，跳过插件列表检查（安装内容已由 verify-contents 校验）：${output%%$'\n'*}"
@@ -378,6 +407,7 @@ main() {
   mkdir -p "${PROJECT_ROOT}/issues" "${PROJECT_ROOT}/plan" "${PROJECT_ROOT}/memory" "${PROJECT_ROOT}/end_task"
   install_plugin
   verify_contents
+  verify_single_install
   verify_plugin_list
   install_hooks
   verify_load

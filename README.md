@@ -115,7 +115,9 @@ bash install.sh
 - `bash install.sh --link`：开发期符号链接安装，入口与共享库指向当前仓库，改代码无需重装。
 - `bash install.sh --verify`：在静态自检之外追加加载断言——启动一次宿主进程，要求日志出现 `issue-trigger loaded` 且无 `failed to load plugin`。
 
-安装完成后重启 opencode 即可生效。
+安装完成后重启 opencode 即可生效。此后更新只需在属主侧 `git pull`：`post-merge` hook 自动执行 `install.sh`，不需要手工重装。
+
+安装目录固定为执行 `install.sh` 时的 `$HOME/.config/opencode`，宿主只读取其启动进程 HOME 下的配置。同一台机器存在两份内容不同的安装时，`install.sh` 记 `WARN` 并输出两个路径。
 
 ## 回归验证
 
