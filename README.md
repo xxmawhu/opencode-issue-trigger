@@ -86,16 +86,13 @@ issue 记录：编译时缺少 zstd 头文件
 
 ## goal 暂停后的恢复
 
-goal 处于 paused 时，opencode 的 goal 插件在 `experimental.idle` 钩子里直接返回，提醒被处理后会话立即空闲，原 objective 不再推进，表现为「注入不起作用」。v2 适配器在提醒投递成功后补一步恢复：
+goal 处于 paused 时，会话处理完提醒就会停下，原 objective 不再推进，表现为「注入不起作用」。插件在提醒投递成功后自动恢复该 goal，使提醒与后续推进落在同一轮执行：
 
-- 用 `ctx.session.context` 判断会话是否有 goal 历史（存在 `metadata.source === "goal"` 的消息）。
-- 有 goal 历史时调用 `ctx.session.command({name: "goal", text: "resume"})`；成功即把提醒与 goal continuation 放进同一轮执行。
-- 失败不丢提醒、不重试注入，只记 debug。失败原因通常是 goal 已完成或本就活跃。
-- 失败按「goal id + 最新 goal 消息 id」去重：goal 每产生一条 continuation 就允许重试一次；已完成的 goal 不再产生消息，因此只会失败一次。
-- goal 状态不可从公开 API 读取：状态在 goal 插件私有存储中，活跃期的提醒只拼进模型调用、不落库，因此 `session.context` 看不到活跃标记。
-- v1 宿主没有 goal 插件，不接该能力。
+- 提醒照常投递；恢复失败不影响提醒，也不会重发。
+- 会话没有 goal 时不动作；goal 已完成时不重复恢复。
+- 仅 opencode 2.x 支持；1.x 没有 goal 功能，行为不变。
 
-已知边界：`goal resume` 只重启 objective，不改变 goal 自身的判定。goal 恢复后若 reviewer 判定「未达成且无进展」，仍会按 goal 插件规则再次暂停。
+已知边界：恢复只重启 objective，不改变 goal 自身的判定。若 goal 的 reviewer 判定「未达成且无进展」，仍会按 goal 规则再次暂停。
 
 ## 本地安装流程
 
