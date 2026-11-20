@@ -250,15 +250,13 @@ async function setup(ctx) {
       await ctx.session.prompt({ sessionID, text });
     },
     // A paused goal stops the session right after the reminder is handled, so the
-    // reminder never advances the objective. opencode 2.x exposes the goal command
-    // and the message context; opencode 1.x has no goal plugin, and the factory
-    // then returns a no-op.
+    // reminder never advances the objective. opencode 2.x exposes the goal command;
+    // opencode 1.x has no goal plugin, and the factory then returns a no-op.
+    // The goal state is deliberately not read first: `session.context()` is
+    // trimmed, so a long session shows no goal message and the resume would be
+    // skipped exactly when it is needed (see goal-resume.mjs).
     onInjected: createGoalResume({
       logger,
-      readContext:
-        typeof ctx.session.context === "function"
-          ? (sessionID) => ctx.session.context({ sessionID })
-          : undefined,
       resumeCommand:
         typeof ctx.session.command === "function"
           ? (sessionID) => ctx.session.command({ sessionID, name: "goal", text: "resume" })

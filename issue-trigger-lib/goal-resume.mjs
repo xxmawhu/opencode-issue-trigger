@@ -6,68 +6,59 @@
 // advances again. Restarting the goal puts the reminder and the goal
 // continuation in the same execution.
 //
-// Detection uses host APIs only (no database access, no goal-plugin storage):
-//   - a context message carrying `metadata.source === "goal"` means the session
-//     has a goal;
-//   - the goal's status is not readable from a plugin: the state lives in the
-//     goal plugin's own storage, and its "a goal is active" reminder is spliced
-//     into the model call without ever being persisted, so it is absent from
-//     `session.context()` even while the goal is active.
+// A goal is paused without any user action whenever the server process restarts
+// while the goal was active: the goal plugin stores a process boot id and
+// settles the goal as "The server restarted while the goal was active" on the
+// next turn. Installing this plugin (install.sh rewriting the plugin files) makes
+// the host restart that process, so the reminder that follows an install is
+// exactly the case this hook must cover.
 //
-// So the resume is attempted and a failure is treated as "the goal is active or
-// complete". The failed attempt is remembered by (goal id, newest goal message
-// id): every continuation the goal loop sends is a new message and therefore
-// retries, while a completed goal that sends nothing more costs exactly one
-// failed command instead of one per reminder.
-function goalHistory(messages) {
-  let goalID;
-  let newestMessageID;
-  let sawGoal = false;
-  for (const message of messages) {
-    const metadata = message?.metadata;
-    if (metadata?.source !== "goal" && typeof metadata?.goalID !== "string") continue;
-    sawGoal = true;
-    if (typeof metadata?.goalID === "string") goalID = metadata.goalID;
-    if (typeof message?.id === "string") newestMessageID = message.id;
+// The goal command is the only surface a plugin has, so the resume is attempted
+// without knowing the goal state first. The attempt is safe: measured on
+// opencode 2.x (2026-11-20) `goal resume` on a session with no goal or with an
+// active goal returns "No paused goal to resume." and changes nothing (status,
+// rounds and updatedAt stay identical), while a paused goal becomes active with
+// rounds+1 and its boot id rewritten to the current process — so it does not
+// immediately look like "restarted while active" again.
+//
+// An earlier version gated the attempt on a `metadata.source === "goal"` message
+// found in `session.context()`. That gate never fires in a long session: the
+// context is trimmed to the recent window, so the original goal message (message
+// 4 of 11k in the observed session) is long gone and the hook reported
+// "no-goal" while the goal was in fact paused. The reminder was then delivered
+// with the goal left paused, which is the defect this file now avoids.
+function failureMessage(error) {
+  const candidates = [error?.message, error?.data?.message, error?.cause?.message];
+  const found = candidates.find((value) => typeof value === "string" && value.length > 0);
+  if (found) return found;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
   }
-  return sawGoal ? { goalID, newestMessageID } : undefined;
 }
 
 // Returns a function that resumes the session's paused goal, or a no-op when the
-// host cannot report context or run commands (opencode 1.x has no goal plugin).
-export function createGoalResume({ readContext, resumeCommand, logger } = {}) {
-  if (typeof readContext !== "function" || typeof resumeCommand !== "function") {
+// host cannot run commands (opencode 1.x has no goal plugin).
+export function createGoalResume({ resumeCommand, logger } = {}) {
+  if (typeof resumeCommand !== "function") {
     return async () => ({ resumed: false, reason: "unsupported" });
   }
-  const resumeFailed = new Set();
 
   return async function resumeGoal(sessionID) {
-    let messages;
-    try {
-      messages = await readContext(sessionID);
-    } catch (error) {
-      // [log-review] 预期内：会话正忙或上下文不可读；降级原因：提醒已投递，跳过本次 goal 恢复；
-      // 影响范围：仅该次不自动推进 objective
-      logger?.debug("goal state unavailable; skipping resume", { sessionID, error: String(error) });
-      return { resumed: false, reason: "context-unavailable" };
-    }
-    if (!Array.isArray(messages)) return { resumed: false, reason: "context-unavailable" };
-
-    const history = goalHistory(messages);
-    if (!history) return { resumed: false, reason: "no-goal" };
-
-    const key = `${history.goalID ?? "unknown"}:${history.newestMessageID ?? "unknown"}`;
-    if (resumeFailed.has(key)) return { resumed: false, reason: "resume-unavailable" };
     try {
       await resumeCommand(sessionID);
-      resumeFailed.delete(key);
       return { resumed: true };
     } catch (error) {
-      // [log-review] 预期内：goal 已完成或本就活跃（无暂停的 goal 可恢复）；降级原因：提醒已投递且不重试；
-      // 影响范围：该 goal 在本条 goal 消息周期内不再尝试恢复
-      resumeFailed.add(key);
-      logger?.debug("goal resume skipped", { sessionID, goalID: history.goalID, error: String(error) });
-      return { resumed: false, reason: "resume-failed" };
+      const message = failureMessage(error);
+      // [log-review] 预期内：会话没有暂停中的 goal（本就没有 goal，或 goal 仍在运行）；
+      // 降级原因：该结果由宿主命令语义决定且不改变任何状态；影响范围：仅该次不推进 objective
+      const noPausedGoal = message.includes("No paused goal to resume");
+      logger?.debug(noPausedGoal ? "no paused goal to resume" : "goal resume failed", {
+        sessionID,
+        error: message,
+      });
+      return { resumed: false, reason: noPausedGoal ? "no-paused-goal" : "resume-failed" };
     }
   };
 }

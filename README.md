@@ -89,8 +89,10 @@ issue 记录：编译时缺少 zstd 头文件
 goal 处于 paused 时，会话处理完提醒就会停下，原 objective 不再推进，表现为「注入不起作用」。插件在提醒投递成功后自动恢复该 goal，使提醒与后续推进落在同一轮执行：
 
 - 提醒照常投递；恢复失败不影响提醒，也不会重发。
-- 会话没有 goal 时不动作；goal 已完成时不重复恢复。
+- 恢复不需要先判定 goal 状态：`goal resume` 对「没有 goal / goal 仍在运行」只返回提示且不改变任何状态，对暂停中的 goal 则改为运行并续跑一轮。
 - 仅 opencode 2.x 支持；1.x 没有 goal 功能，行为不变。
+
+goal 会在宿主进程重启时被暂停（原因记为「The server restarted while the goal was active」），而安装本插件正是重写插件文件、触发宿主重启的动作，所以「装完插件后的第一条提醒」通常正处在 goal 暂停状态。
 
 已知边界：恢复只重启 objective，不改变 goal 自身的判定。若 goal 的 reviewer 判定「未达成且无进展」，仍会按 goal 规则再次暂停。
 
