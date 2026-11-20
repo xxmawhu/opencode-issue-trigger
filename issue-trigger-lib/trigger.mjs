@@ -18,6 +18,7 @@ export function createIssueTrigger({
   logger,
   listSessions,
   sendPrompt,
+  onInjected,
   quietMs,
   pollMs,
   maxAgeMs,
@@ -43,6 +44,7 @@ export function createIssueTrigger({
   const injector = createInjector({
     resolveSession: () => sessions.resolve(),
     sendPrompt,
+    onInjected,
     onDrop: (path) => watcher.release(path),
     logger: log,
     maxAgeMs,

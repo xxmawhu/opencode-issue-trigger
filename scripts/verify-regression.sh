@@ -28,7 +28,7 @@ log() {
 
 fail() {
   log FAIL "$1" "$2"
-  printf '❌ %s: %s（详见 log/verify-regression.%s.log）\n' "$1" "$2" "$(date +%Y%m%dT%H)"
+  printf '❌ %s: %s（详见 %s）\n' "$1" "$2" "${LOG_FILE}"
   exit 1
 }
 
@@ -44,9 +44,23 @@ count_matches() {
   printf '%s' "${count:-0}"
 }
 
+# A run started from an opencode session inherits OPENCODE=1, the parent session
+# id and XDG_DATA_HOME/XDG_CONFIG_HOME pointing at that live workspace, so the CLI
+# resolves data/config/log there instead of HOME. Clearing them is what makes the
+# sandbox a sandbox: without it the rounds exercise the real installation and
+# write to the real database.
+iso() {
+  env -u OPENCODE -u OPENCODE_SESSION_ID -u OPENCODE_SESSION_PID -u OPENCODE_TERMINAL \
+    -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u XDG_CACHE_HOME "$@"
+}
+
 setup_sandbox() {
   rm -rf "${SANDBOX}"
   mkdir -p "${SANDBOX}/home/.local/state" "${SANDBOX}/project/issues"
+  # The project root is the git root of the working directory. Without a repo
+  # here, the sandbox project resolves to this repository and the plugin watches
+  # the real ./issues directory.
+  git init -q "${SANDBOX}/project"
   log INFO setup "sandbox=${SANDBOX}"
 }
 
@@ -54,7 +68,7 @@ run_install() {
   local label="$1"
   shift
   local output="${SANDBOX}/install-${label}.log"
-  ( cd "${ROOT}" && HOME="${SANDBOX}/home" timeout 180 bash install.sh "$@" ) >"${output}" 2>&1 ||
+  ( cd "${ROOT}" && iso HOME="${SANDBOX}/home" timeout 180 bash install.sh "$@" ) >"${output}" 2>&1 ||
     fail install "install.sh 退出非 0（mode=${label}）"
   cmp -s "${ROOT}/plugin/issue-trigger.ts" "${SANDBOX}/home/.config/opencode/plugin/issue-trigger.ts" ||
     fail install "入口与仓库不一致（mode=${label}）"
@@ -67,7 +81,7 @@ v1_round() {
   local output="${SANDBOX}/v1-${round}.log"
   rm -f "${SANDBOX}/project/issues/"*.md
   printf '# regression issue %s\n\nprobe\n' "${round}" >"${SANDBOX}/project/issues/2026-11-16_round${round}.md"
-  ( cd "${SANDBOX}/project" && HOME="${SANDBOX}/home" timeout 120 "${V1}" run hi \
+  ( cd "${SANDBOX}/project" && iso HOME="${SANDBOX}/home" timeout 120 "${V1}" run hi \
     --model nonexistent/nonexistent --print-logs --log-level DEBUG ) >"${output}" 2>&1
   local load_fail loaded injected
   load_fail="$(count_matches 'failed to load plugin' "${output}")"
@@ -82,7 +96,7 @@ v1_round() {
 v2_round() {
   local round="$1"
   local output="${SANDBOX}/v2-${round}.log"
-  ( cd "${SANDBOX}/project" && HOME="${SANDBOX}/home" timeout 120 "${V2}" \
+  ( cd "${SANDBOX}/project" && iso HOME="${SANDBOX}/home" timeout 120 "${V2}" \
     --standalone --print-logs --log-level debug debug agents ) >"${output}" 2>&1
   local load_fail loaded
   load_fail="$(count_matches 'failed to load plugin' "${output}")"
@@ -100,6 +114,14 @@ main() {
   "${V1}" debug info >/dev/null 2>&1 ||
     fail start "${V1} 不支持 debug info（疑似 2.x 宿主），请用 OPENCODE_V1 指定 1.x 二进制"
   setup_sandbox
+  # Assert the isolation instead of trusting it: a leaked OPENCODE env var makes
+  # the CLI use the live workspace's config and database.
+  if [[ -n "${V2}" ]]; then
+    local paths
+    paths="$(iso HOME="${SANDBOX}/home" "${V2}" debug paths 2>&1)"
+    printf '%s\n' "${paths}" | rg -q "config +${SANDBOX}/home/" ||
+      fail start "沙箱配置目录未生效：$(printf '%s' "${paths}" | head -4 | tr '\n' ' ')"
+  fi
   run_install copy
   run_install link --link
 
@@ -122,7 +144,7 @@ main() {
   fi
 
   log PASS done "回归链通过（${ROUNDS} 轮 v1${V2:+ + ${ROUNDS} 轮 v2}）"
-  printf '✅ 回归链通过（日志 log/verify-regression.%s.log）\n' "$(date +%Y%m%dT%H)"
+  printf '✅ 回归链通过（日志 %s）\n' "${LOG_FILE}"
 }
 
 main "$@"

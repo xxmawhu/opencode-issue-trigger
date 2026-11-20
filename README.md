@@ -80,9 +80,22 @@ issue 记录：编译时缺少 zstd 头文件
 - 多个会话并行时，提醒只投给一个会话；其他会话的输出不会抢走目标。
 - 注入是向目标会话提交一条 user 消息，由该会话的 agent 执行；空闲时立即开始，忙碌时按上述规则等待。
 - 进程内每个 issue 只提醒一次；重启后对现有文件重新提醒一次（状态仅存内存）。
-- 已知限制：无法得知用户眼前显示哪个会话，多客户端连接时也不存在唯一的「当前会话」；超过 30 分钟仍未投递则会丢弃，下一轮扫描会重新排队。
+- 已知限制：无法得知用户眼前显示哪个会话，多客户端连接时也不存在唯一的「当前会话」；超过 30 分钟仍未投递只记一条 warn 并继续排队，不丢弃。
 
 选择依据：opencode 官方插件文档只提供 `session.status`、`session.idle`、`message.updated` 等事件，没有会话焦点事件；同类注入型插件（如 `opencode-sessions`）同样采用「等目标会话 idle 后再作为 user 消息投递」的回合制做法。
+
+## goal 暂停后的恢复
+
+goal 处于 paused 时，opencode 的 goal 插件在 `experimental.idle` 钩子里直接返回，提醒被处理后会话立即空闲，原 objective 不再推进，表现为「注入不起作用」。v2 适配器在提醒投递成功后补一步恢复：
+
+- 用 `ctx.session.context` 判断会话是否有 goal 历史（存在 `metadata.source === "goal"` 的消息）。
+- 有 goal 历史时调用 `ctx.session.command({name: "goal", text: "resume"})`；成功即把提醒与 goal continuation 放进同一轮执行。
+- 失败不丢提醒、不重试注入，只记 debug。失败原因通常是 goal 已完成或本就活跃。
+- 失败按「goal id + 最新 goal 消息 id」去重：goal 每产生一条 continuation 就允许重试一次；已完成的 goal 不再产生消息，因此只会失败一次。
+- goal 状态不可从公开 API 读取：状态在 goal 插件私有存储中，活跃期的提醒只拼进模型调用、不落库，因此 `session.context` 看不到活跃标记。
+- v1 宿主没有 goal 插件，不接该能力。
+
+已知边界：`goal resume` 只重启 objective，不改变 goal 自身的判定。goal 恢复后若 reviewer 判定「未达成且无进展」，仍会按 goal 插件规则再次暂停。
 
 ## 本地安装流程
 

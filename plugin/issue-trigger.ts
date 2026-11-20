@@ -9,24 +9,40 @@
 // `tui` is intentionally absent: the v1 loader rejects a `tui` field that
 // coexists with `server`.
 import { join } from "node:path";
-import { createIssueInputHandler, createIssueTrigger, createLogger } from "../issue-trigger-lib/index.mjs";
+import {
+  createGoalResume,
+  createIssueInputHandler,
+  createIssueTrigger,
+  createLogger,
+} from "../issue-trigger-lib/index.mjs";
 
 // One host per project directory. A newer v1 host may run both the v1 and v2
 // passes, so `server()` and `setup()` can run in the same process; the refcount
 // keeps a single watcher/injector instead of injecting the same issue twice.
 const hosts = new Map();
 
-function createCore({ directory, logger, listSessions, sendPrompt }) {
+function createCore({ directory, logger, listSessions, sendPrompt, onInjected }) {
   const issuesDir = join(directory, "issues");
   const inputHandler = createIssueInputHandler({ issuesDir, logger });
-  const trigger = createIssueTrigger({ issuesDir, directory, logger, listSessions, sendPrompt });
-  return { trigger, inputHandler };
+  // Held in an object so a later generation loading the same directory can attach
+  // its own hook (the v2 pass owns goal resume; the v1 pass does not).
+  const hook = { onInjected };
+  const trigger = createIssueTrigger({
+    issuesDir,
+    directory,
+    logger,
+    listSessions,
+    sendPrompt,
+    onInjected: (sessionID, path) => hook.onInjected?.(sessionID, path),
+  });
+  return { trigger, inputHandler, hook };
 }
 
 function acquireHost(config) {
   const existing = hosts.get(config.directory);
   if (existing) {
     existing.refs += 1;
+    if (!existing.hook.onInjected && config.onInjected) existing.hook.onInjected = config.onInjected;
     return existing;
   }
   const host = { ...createCore(config), refs: 1 };
@@ -233,6 +249,21 @@ async function setup(ctx) {
     sendPrompt: async (sessionID, text) => {
       await ctx.session.prompt({ sessionID, text });
     },
+    // A paused goal stops the session right after the reminder is handled, so the
+    // reminder never advances the objective. opencode 2.x exposes the goal command
+    // and the message context; opencode 1.x has no goal plugin, and the factory
+    // then returns a no-op.
+    onInjected: createGoalResume({
+      logger,
+      readContext:
+        typeof ctx.session.context === "function"
+          ? (sessionID) => ctx.session.context({ sessionID })
+          : undefined,
+      resumeCommand:
+        typeof ctx.session.command === "function"
+          ? (sessionID) => ctx.session.command({ sessionID, name: "goal", text: "resume" })
+          : undefined,
+    }),
   });
 
   await host.trigger.start();

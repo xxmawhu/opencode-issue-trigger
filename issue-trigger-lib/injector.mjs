@@ -2,6 +2,9 @@
 // stays queued until a session can take it; it is dropped only when the issue
 // file itself disappears.
 //
+// `onInjected` runs after a successful delivery and must not be able to lose or
+// delay the reminder: its failure is logged and the queue moves on.
+//
 // The queue used to drop an item after 30 idle minutes ("expired"). That lost
 // reminders outright: 120 such drops were recorded across AI users, all of them
 // issues that never reached a session (2026-11-09..16), and alg-trader-n2 then
@@ -17,6 +20,7 @@ const BUSY_RETRY_MS = [2000, 5000, 10000, 30000, 60000];
 export function createInjector({
   resolveSession,
   sendPrompt,
+  onInjected,
   onDrop,
   logger,
   maxAgeMs = DEFAULT_MAX_AGE_MS,
@@ -129,6 +133,31 @@ export function createInjector({
           sessionID,
           attempts: item.attempts + 1,
         });
+        // Runs after delivery so a slow or failing hook never delays or loses the
+        // reminder. A paused goal is resumed here, which keeps the reminder
+        // actionable instead of letting the session stop after handling it.
+        if (typeof onInjected === "function") {
+          try {
+            const result = await onInjected(sessionID, item.path);
+            if (result?.resumed) {
+              logger?.info("resumed paused goal after injection", { path: item.path, sessionID });
+            } else {
+              logger?.debug("goal left as is after injection", {
+                path: item.path,
+                sessionID,
+                reason: result?.reason,
+              });
+            }
+          } catch (error) {
+            // [log-review] 预期内：goal 恢复钩子自身异常不影响已投递的提醒；降级原因：提醒已入队，
+            // 只是 objective 不会自动继续；影响范围：仅 goal 恢复
+            logger?.warn("post-injection goal resume skipped; reminder already delivered", {
+              path: item.path,
+              sessionID,
+              reason: String(error),
+            });
+          }
+        }
       }
     } finally {
       flushing = false;
