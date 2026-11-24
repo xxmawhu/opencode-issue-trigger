@@ -1,6 +1,7 @@
-// Logging adapter. Entries wire opencode's own logger in as the sink, so
-// records land in opencode's default log output. No file paths are created
-// here, and logging never throws into the plugin call path.
+// Logging adapter. The sink is injected: the v1 host passes opencode's logger,
+// the v2 host passes a project log file sink (no app.log endpoint, and standalone
+// stderr is /dev/null — issue 891a50f5). No file paths are created here, and
+// logging never throws into the plugin call path.
 const LEVELS = new Set(["debug", "info", "warn", "error"]);
 
 export function createLogger({ sink } = {}) {

@@ -10,6 +10,7 @@
 // coexists with `server`.
 import { join } from "node:path";
 import {
+  createFileSink,
   createGoalResume,
   createIssueInputHandler,
   createIssueTrigger,
@@ -227,13 +228,12 @@ async function setup(ctx) {
     // session API.
     return undefined;
   }
-  // opencode 2.x exposes no app.log endpoint; stderr is captured by the host
-  // log (verified: --print-logs records console.error).
+  // opencode 2.x exposes no app.log endpoint, and a standalone server runs with
+  // stderr on /dev/null: console-only lines are lost (issue 891a50f5). Entries go
+  // to <project>/log/issue-trigger.YYYYMMDDTHH.log so a silently unloaded
+  // location still leaves a trail; an unwritable log dir falls back to stderr.
   const logger = createLogger({
-    sink: (level, message, extra) => {
-      const suffix = extra === undefined ? "" : ` ${JSON.stringify(extra)}`;
-      console.error(`[issue-trigger] ${level} ${message}${suffix}`);
-    },
+    sink: createFileSink({ logDir: join(directory, "log") }),
   });
 
   const host = acquireHost({

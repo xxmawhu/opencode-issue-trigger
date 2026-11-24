@@ -96,14 +96,20 @@ v1_round() {
 v2_round() {
   local round="$1"
   local output="${SANDBOX}/v2-${round}.log"
+  local plugin_log="${SANDBOX}/project/log"
+  rm -rf "${plugin_log}"
   ( cd "${SANDBOX}/project" && iso HOME="${SANDBOX}/home" timeout 120 "${V2}" \
     --standalone --print-logs --log-level debug debug agents ) >"${output}" 2>&1
-  local load_fail loaded
+  local load_fail loaded log_file
   load_fail="$(count_matches 'failed to load plugin' "${output}")"
-  loaded="$(count_matches 'issue-trigger loaded' "${output}")"
+  # v2 has no app.log endpoint and standalone stderr goes to /dev/null, so the
+  # plugin owns an hourly log inside the project (issue 891a50f5).
+  loaded="$(rg -o -- 'issue-trigger loaded' "${plugin_log}" 2>/dev/null | wc -l)"
+  log_file="$(ls "${plugin_log}"/issue-trigger.*.log 2>/dev/null | head -1)"
   [[ "${load_fail}" -eq 0 ]] || fail v2 "round ${round} LoadError=${load_fail}"
-  [[ "${loaded}" -eq 1 ]] || fail v2 "round ${round} 激活次数=${loaded}（应为 1）"
-  pass v2 "round ${round} 无 LoadError、单激活"
+  [[ "${loaded}" -eq 1 ]] || fail v2 "round ${round} 激活次数=${loaded}（应为 1，日志目录 ${plugin_log}）"
+  [[ -n "${log_file}" ]] || fail v2 "round ${round} 未生成项目内日志（${plugin_log}）"
+  pass v2 "round ${round} 无 LoadError、单激活、项目日志已写入"
 }
 
 main() {

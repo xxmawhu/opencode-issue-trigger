@@ -23,7 +23,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-HOME_ROOTS=(/mnt/beegfs_data/usr/maxx/dev /mnt/beegfs_data/usr/maxx/quant)
+# Agent accounts keep their own HOME (/home/ai_*), and a session started there
+# still writes the plugin log into the project directory. Discovering only the
+# project-root workspaces would hide those reminders from the audit.
+HOME_ROOTS=(/mnt/beegfs_data/usr/maxx/dev /mnt/beegfs_data/usr/maxx/quant /home)
 SCAN_LOG_DIR="/mnt/beegfs_data/usr/maxx/regular_task/scan_issue/log"
 SCAN_PUBLISHED="/data/alpha/share/scan_issue/scan_issue"
 SCAN_DRIFT_MARKER="${ROOT}/.var/scan-drift-last-report"
@@ -145,9 +148,69 @@ collect_reminder_counts() {
   done <"${ws_file}" >>"${TMP_DIR}/counts.tsv"
 }
 
+# opencode 2.x writes no app.log and a standalone server discards stderr, so the
+# plugin keeps its own log at <project>/log/issue-trigger.YYYYMMDDTHH.log (issue
+# 891a50f5). Those lines never reach opencode.log; without this pass the audit
+# would see zero v2 events and call a stalled queue healthy. Project paths come
+# from each workspace's workspaces.json. Timestamps are local time there, so the
+# cutoff is converted instead of reusing the UTC one.
+collect_project_log_counts() {
+  local ws_file="$1"
+  local projects="${TMP_DIR}/projects.txt"
+  local ws registry project log_file
+  : >"${projects}"
+  while IFS= read -r ws; do
+    registry="${ws}/workspaces.json"
+    [[ -f "${registry}" ]] || continue
+    while IFS= read -r line; do
+      project="${line#*\"project_path\"}"
+      project="${project#*\"}"
+      project="${project%\"}"
+      if [[ -n "${project}" ]]; then
+        printf '%s\n' "${project}"
+      fi
+    done < <(rg --no-filename -o '"project_path" *: *"[^"]+"' "${registry}" 2>/dev/null)
+  done <"${ws_file}" | sort -u >"${projects}"
+  log INFO "project log roots: $(wc -l <"${projects}")"
+  while IFS= read -r project; do
+    [[ -n "${project}" ]] || continue
+    for log_file in "${project}/log/issue-trigger."*.log; do
+      [[ -f "${log_file}" ]] || continue
+      [[ "${log_file}" -nt "${TMP_DIR}/cutoff" ]] || continue
+      rg --no-filename --no-line-number \
+        -e 'queued issue injection' \
+        -e 'injected issue prompt' \
+        -e 'no injectable session yet; issue stays queued' \
+        -e 'dropping issue injection' \
+        "${log_file}" 2>/dev/null
+    done | awk -v cutoff="${CUTOFF_LOCAL}" -v project="${project}" '
+      {
+        if (substr($0, 1, 1) != "[") next
+        ts = substr($0, 2, 10) "T" substr($0, 13, 5)
+        if (ts !~ /^[0-9][0-9][0-9][0-9]-/) next
+        if (ts < cutoff) next
+        if ($0 ~ /queued issue injection/) queued++
+        else if ($0 ~ /injected issue prompt/) injected++
+        else if ($0 ~ /no injectable session yet/) nosession++
+        else if ($0 ~ /dropping issue injection/) dropped++
+      }
+      END {
+        if (queued + injected + nosession + dropped == 0) exit
+        printf "%s\t%d\t%d\t%d\t%d\n", project, queued, injected, nosession, dropped
+      }' >>"${TMP_DIR}/counts.tsv"
+  done <"${projects}"
+}
+
 summarize_reminders() {
   local counts="${TMP_DIR}/counts.tsv"
+  local aggregated="${TMP_DIR}/counts-aggregated.tsv"
   touch "${counts}"
+  # The same project can appear twice: opencode.log (v1 host) and its own plugin
+  # log (v2 host). Sum per project so one project yields one finding row.
+  awk -F'\t' '
+    NF >= 5 { q[$1] += $2; i[$1] += $3; n[$1] += $4; d[$1] += $5 }
+    END { for (p in q) printf "%s\t%d\t%d\t%d\t%d\n", p, q[p], i[p], n[p], d[p] }
+  ' "${counts}" | sort >"${aggregated}"
   awk -F'\t' '
     {
       q += $2; i += $3; n += $4; d += $5
@@ -157,7 +220,7 @@ summarize_reminders() {
     END {
       printf "TOTAL\tqueued=%d injected=%d nosession=%d dropped=%d\n", q, i, n, d
       if (d > 0) exit 1
-    }' alert="${NO_SESSION_ALERT}" "${counts}" >"${TMP_DIR}/findings.txt"
+    }' alert="${NO_SESSION_ALERT}" "${aggregated}" >"${TMP_DIR}/findings.txt"
 }
 
 summarize_dispatch() {
@@ -509,6 +572,9 @@ main() {
   printf '\n=== audit run %s ===\n' "$(date '+%Y-%m-%d %H:%M:%S')" >>"${LOG_FILE}"
   TMP_DIR="$(mktemp -d "${ROOT}/.var/injection-audit.XXXXXX")"
   CUTOFF="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%dT%H:%M)"
+  # Plugin log lines carry local time (platform log convention), so the project
+  # log pass compares against a local cutoff instead of the UTC one above.
+  CUTOFF_LOCAL="$(date -d "${WINDOW_DAYS} days ago" +%Y-%m-%dT%H:%M)"
   export CUTOFF
 
   require_tools
@@ -518,6 +584,7 @@ main() {
 
   discover_workspaces
   collect_reminder_counts "${WS_CACHE}"
+  collect_project_log_counts "${WS_CACHE}"
   summarize_reminders
   summarize_dispatch
   check_scan_runtime
@@ -549,4 +616,7 @@ main() {
   log INFO "audit done"
 }
 
-main "$@"
+# Sourced by the sandbox test for the project-log pass; cron runs it directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

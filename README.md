@@ -62,7 +62,7 @@ issue 记录：编译时缺少 zstd 头文件
 - 不提供 `tui` 字段：v1 加载器拒绝 `tui` 与 `server` 共存。
 - 代际判别只看注册面，不读版本号：`server` 要求 `directory|worktree` + `client.session`；`setup` 要求 `location.directory` + 顶层 `session.list/prompt`。缺注册面的上下文（如 v1 的配置回调）直接不动作，v1 会话由 `server` 承担。
 - 同一目录按引用计数只保留一个 watcher；即使较新 v1 宿主同时运行 v1/v2 两套 pass，也不会重复注入。
-- v2 加载失败可能静默：验证时检查日志出现 `[issue-trigger] info issue-trigger loaded`，并实际放入一个 issue 文件确认注入，不能只看进程是否启动。
+- v2 加载失败可能静默：验证时检查项目 `log/issue-trigger.YYYYMMDDTHH.log` 出现 `issue-trigger loaded`，并实际放入一个 issue 文件确认注入，不能只看进程是否启动。
 - 入口使用普通对象，不依赖 `@opencode/plugin`：v2 的 `define()` 是恒等函数。
 
 ## 注入会话的选择
@@ -96,6 +96,39 @@ goal 会在宿主进程重启时被暂停（原因记为「The server restarted 
 
 已知边界：恢复只重启 objective，不改变 goal 自身的判定。若 goal 的 reviewer 判定「未达成且无进展」，仍会按 goal 规则再次暂停。
 
+## 运行前提：目录监听不被宿主卸载
+
+opencode 2.x 默认在项目目录 60 分钟无会话活动后执行 `location services evicted`，把该目录的插件整体 unload。插件被卸载后 `fs.watch` 与 30 秒轮询一起消失，期间落盘的 issue 不会触发注入，直到下次打开该目录才由启动扫描补投。
+
+```json
+{
+  "experimental": {
+    "location_idle_timeout": false
+  }
+}
+```
+
+- `false` 表示永不因空闲卸载；也可填时长字符串（如 `"4 hours"`），但超过该时长仍会出现同样的延迟。
+- 该键写在 `~/.config/opencode/opencode.json`（全局配置）。插件是全局安装的，逐项目改只能覆盖单个目录。
+- `install.sh` 会幂等写入该键：缺失时补 `false` 并回读校验；已显式配置其他值时保留并记 `WARN`；配置文件无法解析或目录不可写时只记 `WARN`，不改文件。
+
+自查：
+
+```bash
+grep -c 'location services evicted' ~/.local/share/opencode-workspaces/*/sessions/*/opencode/log/opencode.log
+grep -n 'location_idle_timeout' ~/.config/opencode/opencode.json
+```
+
+## 运行日志
+
+v2 宿主没有 `app.log` 接口，standalone 服务的 stderr 指向 `/dev/null`，`console.error` 会被丢弃。插件把日志写入项目内的：
+
+```text
+<project>/log/issue-trigger.YYYYMMDDTHH.log
+```
+
+关键事件：`issue-trigger loaded`（加载）、`startup scan dispatched existing issues`（启动扫描计数）、`injected issue prompt`（投递完成，含 sessionID 与路径）、`issue reminder still waiting for an idle session`（排队等待）。日志目录不可写时回退 stderr，写日志失败不影响注入。每日审计脚本 `scripts/audit-injection.sh` 同时读取宿主 `opencode.log`（v1）与项目内插件日志（v2）。
+
 ## 本地安装流程
 
 ```bash
@@ -110,6 +143,7 @@ bash install.sh
 2. 把共享库安装到 `~/.config/opencode/issue-trigger-lib`。
 3. 删除旧布局（`plugin/issue-trigger-lib`、`plugins/issue-trigger`），避免重复加载与加载失败。
 4. 用平台 `pre-commit`（`/opt/miniconda3/bin/pre-commit`）注册 `pre-commit` 与 `post-merge` git hooks。
+5. 幂等写入 `experimental.location_idle_timeout: false` 到 `~/.config/opencode/opencode.json`，避免宿主空闲卸载目录监听。
 
 安装选项：
 
@@ -123,7 +157,7 @@ bash install.sh
 
 ## 回归验证
 
-`scripts/verify-regression.sh` 在隔离 HOME 中复现完整链路：安装（复制 + 符号链接）→ 启动 → 断言无 LoadError → 放入 issue → 断言注入一次 → 重启再跑 → 断言同一 issue 每进程仅注入一次。
+`scripts/verify-regression.sh` 在隔离 HOME 中复现完整链路：安装（复制 + 符号链接）→ 启动 → 断言无 LoadError → 放入 issue → 断言注入一次 → 重启再跑 → 断言同一 issue 每进程仅注入一次。v2 轮次的激活断言取自沙箱项目内的 `log/issue-trigger.*.log`，不依赖宿主 `opencode.log`（v2 无 `app.log`，standalone stderr 指向 `/dev/null`）。
 
 ```bash
 bash scripts/verify-regression.sh                      # v1，默认 3 轮

@@ -365,6 +365,115 @@ verify_load() {
   log PASS "${stage}" "宿主加载成功且无 LoadError"
 }
 
+# opencode 2.x unloads a project's services after 60 minutes without session
+# activity (`location services evicted`), which destroys the issue watcher: issues
+# dropped after that are never injected until the directory is opened again
+# (2026-11-24: xcrypto-work-onboarding 5h24m late, agents-tools/timed-issue same).
+# `experimental.location_idle_timeout: false` disables that eviction; the host
+# accepts a duration string or false (verified with `opencode debug config
+# --standalone` on v2.3.2). The key belongs to the global config: the plugin is
+# installed globally, so a per-project edit would only cover one directory.
+# An explicit non-false value is preserved: it is the operator's decision.
+ensure_location_ttl() {
+  local stage="location-ttl"
+  local cfg="${OPENCODE_DIR}/opencode.json"
+  # Same platform prefix as PRE_COMMIT_BIN above; one fixed path, no search chain.
+  local py="/opt/miniconda3/bin/python3"
+  local result
+  if [ ! -x "${py}" ]; then
+    # [log-review] 预期内：极简宿主无平台 Python；降级原因：不改配置也能安装插件；
+    # 影响范围：该目录空闲 60 分钟后停止监听，需手工设置该键。
+    log WARN "${stage}" "未找到 ${py}，跳过 experimental.location_idle_timeout 检查（需手工设为 false）"
+    return 0
+  fi
+  result="$("${py}" - "${cfg}" <<'PY'
+import json
+import os
+import stat
+import sys
+import tempfile
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    # The global config holds provider API keys; a rewrite must not widen its
+    # permissions (a 0600 config would otherwise become world-readable).
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+except FileNotFoundError:
+    data = {}
+    mode = 0o644
+except Exception as error:  # unparsable config must stay untouched
+    print(f"UNPARSABLE {error}")
+    sys.exit(0)
+
+if not isinstance(data, dict):
+    print("UNPARSABLE 顶层不是 JSON 对象")
+    sys.exit(0)
+
+experimental = data.get("experimental")
+if experimental is not None and not isinstance(experimental, dict):
+    print("UNPARSABLE experimental 不是对象")
+    sys.exit(0)
+if isinstance(experimental, dict) and "location_idle_timeout" in experimental:
+    value = experimental["location_idle_timeout"]
+    if value is False:
+        print("ALREADY")
+        sys.exit(0)
+    print(f"KEEP {json.dumps(value, ensure_ascii=False)}")
+    sys.exit(0)
+
+try:
+    if not isinstance(experimental, dict):
+        experimental = {}
+        data["experimental"] = experimental
+    experimental["location_idle_timeout"] = False
+    directory = os.path.dirname(path) or "."
+    handle, tmp = tempfile.mkstemp(dir=directory, prefix=".opencode.json.", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except Exception:
+        os.unlink(tmp)
+        raise
+    with open(path, encoding="utf-8") as stream:
+        written = json.load(stream)
+    if written["experimental"]["location_idle_timeout"] is not False:
+        print("MISMATCH 回读值不是 false")
+        sys.exit(0)
+except Exception as error:
+    print(f"UNWRITABLE {error}")
+    sys.exit(0)
+print("WRITTEN")
+PY
+)"
+  case "${result}" in
+    ALREADY)
+      log PASS "${stage}" "experimental.location_idle_timeout 已为 false（${cfg}）"
+      ;;
+    WRITTEN)
+      log PASS "${stage}" "已写入 experimental.location_idle_timeout=false 并回读校验（${cfg}）"
+      ;;
+    KEEP\ *)
+      local kept="${result#KEEP }"
+      # [log-review] 预期内：运维显式指定了其他超时；降级原因：保留其选择；
+      # 影响范围：该超时到期后插件停止监听，issue 延迟到目录再次打开才注入。
+      log WARN "${stage}" "保留已配置的 location_idle_timeout=${kept}，插件可能被空闲卸载（${cfg}）"
+      ;;
+    UNPARSABLE\ *|UNWRITABLE\ *|MISMATCH\ *)
+      # [log-review] 预期内：配置文件语法错误或目录不可写；降级原因：安装内容本身完整；
+      # 影响范围：需手工修正配置，否则空闲 60 分钟后停止监听。
+      log WARN "${stage}" "未能写回 location_idle_timeout=${cfg}（${result}），需手工设置 false"
+      ;;
+    *)
+      log WARN "${stage}" "location_idle_timeout 检查输出异常：${result:-<空>}"
+      ;;
+  esac
+}
+
 install_hooks() {
   local stage="install-hooks"
   [ -x "${PRE_COMMIT_BIN}" ] || die "${stage}" "未找到 ${PRE_COMMIT_BIN}，无法注册 git hooks"
@@ -409,6 +518,7 @@ main() {
   verify_contents
   verify_single_install
   verify_plugin_list
+  ensure_location_ttl
   install_hooks
   verify_load
   log PASS "done" "安装完成"
