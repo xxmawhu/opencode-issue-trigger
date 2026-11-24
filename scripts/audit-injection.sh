@@ -14,6 +14,9 @@
 #   4. runtime drift: scan_issue process start time vs published binary mtime,
 #      plus [SELF-CHECK] log evidence, so a published-but-not-running build is
 #      visible every day instead of only when someone notices stale behavior
+#   5. the precondition the watcher itself rests on: an opencode config that
+#      installs this plugin must disable the host's idle location eviction,
+#      because an evicted location unloads the plugin silently
 #
 # A finding writes ./issues/<ts>_injection-audit.md so the reminder plugin picks
 # it up like any other issue; one open audit issue at a time (deduplicated).
@@ -56,6 +59,15 @@ ISSUES_DIR="${ROOT}/issues"
 # cached and refreshed weekly; the reminder events themselves are re-read daily.
 WS_CACHE="${ROOT}/data/workspaces.txt"
 CACHE_MAX_AGE_DAYS=7
+# opencode loads plugins per location and only reads the config of the process
+# HOME, so every user home is a candidate config. Two roots are needed: agent
+# accounts live under /home, the owner's home is served from beegfs.
+LOCATION_CONFIG_PATHS=(
+  "/home/*/.config/opencode/opencode.json"
+  "/mnt/beegfs_data/usr/*/.config/opencode/opencode.json"
+)
+# Host key (opencode 2.x): a number of minutes, or false for "never evict".
+LOCATION_TTL_KEY="location_idle_timeout"
 TMP_DIR=""
 
 # Window in days for "recent" log files and events.
@@ -199,6 +211,47 @@ collect_project_log_counts() {
         printf "%s\t%d\t%d\t%d\t%d\n", project, queued, injected, nosession, dropped
       }' >>"${TMP_DIR}/counts.tsv"
   done <"${projects}"
+}
+
+# The host unloads a location after 60 idle minutes unless the config sets
+# experimental.location_idle_timeout=false (opencode 2.x:
+# `location_idle_timeout ?? "60 minutes"`). Eviction is silent for this plugin:
+# fs.watch and the 30s poll disappear with the location, issues keep landing on
+# disk, and they are only delivered on the next activation. So the key is a
+# delivery precondition, not a tuning knob, and it is asserted every day.
+check_location_ttl() {
+  local pattern cfg dir inode seen=" " value checked=0 missing=0
+  for pattern in "${LOCATION_CONFIG_PATHS[@]}"; do
+    while IFS= read -r cfg; do
+      [[ -f "${cfg}" ]] || continue
+      dir="$(dirname "${cfg}")"
+      # A config that does not carry this plugin cannot break this precondition.
+      [[ -f "${dir}/plugin/issue-trigger.ts" ]] || continue
+      # Agent homes can reach the same file through several paths; report each
+      # real config once instead of once per home.
+      inode="$(stat -c '%d:%i' "${cfg}" 2>/dev/null)" || continue
+      [[ "${seen}" == *" ${inode} "* ]] && continue
+      seen+="${inode} "
+      checked=$((checked + 1))
+      if ! rg -q "\"${LOCATION_TTL_KEY}\"" "${cfg}" 2>/dev/null; then
+        value="absent"
+      elif rg -q "\"${LOCATION_TTL_KEY}\"[[:space:]]*:[[:space:]]*false" "${cfg}" 2>/dev/null; then
+        continue
+      else
+        value="$(rg -o "\"${LOCATION_TTL_KEY}\"[[:space:]]*:[[:space:]]*[^,}]*" "${cfg}" 2>/dev/null | head -1)"
+        value="${value#*:}"
+        # Trim the padding between the colon and the value; keep the value as
+        # written so a string like "60 minutes" reads back verbatim.
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value:-unreadable}"
+      fi
+      missing=$((missing + 1))
+      printf 'LOCATIONTTL\tconfig=%s value=%s\n' "${cfg}" "${value}" >>"${TMP_DIR}/findings.txt"
+      log ERROR "location idle eviction still enabled in ${cfg} (${LOCATION_TTL_KEY}=${value}); the watcher stops after the idle timeout, audit files an issue"
+    done < <(compgen -G "${pattern}")
+  done
+  log INFO "plugin configs checked: ${checked}, without idle-eviction guard: ${missing}"
 }
 
 summarize_reminders() {
@@ -472,7 +525,7 @@ write_issue() {
     printf '```\n\n## 证据\n\n'
     printf -- '- 明细日志：%s\n' "${LOG_FILE}"
     printf -- '- 窗口：最近 %s 天事件（%s 起）\n' "${WINDOW_DAYS}" "${CUTOFF}"
-    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；SCANDRIFT = 发布件新于运行镜像且无自检日志；RESTARTSKIP = 漂移且重启通道最后一轮判 SKIP；RESTARTBLOCKED = 发布后重启通道已判 RESTART 但进程仍未切换（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}"
+    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；LOCATIONTTL = 已安装本项目插件的 opencode 配置缺少 experimental.%s=false（宿主会静默卸载 location，监听随之消失）；SCANDRIFT = 发布件新于运行镜像且无自检日志；RESTARTSKIP = 漂移且重启通道最后一轮判 SKIP；RESTARTBLOCKED = 发布后重启通道已判 RESTART 但进程仍未切换（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}" "${LOCATION_TTL_KEY}"
     printf '## 处置\n\n按本轮审计结论修复根因，修复后删除/归档本 issue；同日不重复创建。\n'
   } >"${body}"
   log ERROR "findings written to ${body}"
@@ -585,13 +638,14 @@ main() {
   discover_workspaces
   collect_reminder_counts "${WS_CACHE}"
   collect_project_log_counts "${WS_CACHE}"
+  check_location_ttl
   summarize_reminders
   summarize_dispatch
   check_scan_runtime
   cat "${TMP_DIR}/findings.txt" >>"${LOG_FILE}"
 
   if [[ -s "${TMP_DIR}/findings.txt" ]] &&
-    rg -q '^(DROPPED|STALLED|SCANSTOPPED)' "${TMP_DIR}/findings.txt"; then
+    rg -q '^(DROPPED|STALLED|SCANSTOPPED|LOCATIONTTL)' "${TMP_DIR}/findings.txt"; then
     write_issue
   # RESTARTSKIP is deliberately log-only: its root cause lives in the publishing
   # project's restart.sh, so filing it against this project would put the report

@@ -111,6 +111,7 @@ opencode 2.x 默认在项目目录 60 分钟无会话活动后执行 `location s
 - `false` 表示永不因空闲卸载；也可填时长字符串（如 `"4 hours"`），但超过该时长仍会出现同样的延迟。
 - 该键写在 `~/.config/opencode/opencode.json`（全局配置）。插件是全局安装的，逐项目改只能覆盖单个目录。
 - `install.sh` 会幂等写入该键：缺失时补 `false` 并回读校验；已显式配置其他值时保留并记 `WARN`；配置文件无法解析或目录不可写时只记 `WARN`，不改文件。
+- 每日审计 `scripts/audit-injection.sh` 校验所有已安装本插件的配置是否带该键，缺失或非 `false` 时记 `LOCATIONTTL` 并写 `issues/`。
 
 自查：
 
