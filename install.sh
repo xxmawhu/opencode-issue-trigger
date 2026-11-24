@@ -334,7 +334,7 @@ verify_plugin_list() {
 # only runs when `--verify` is passed (the regression script always passes it).
 verify_load() {
   local stage="verify-load"
-  local output
+  local output marker log_file loaded version major
   if [ "${VERIFY_RUNTIME}" -ne 1 ]; then
     log INFO "${stage}" "未指定 --verify，跳过加载断言"
     return 0
@@ -345,23 +345,53 @@ verify_load() {
   fi
   mkdir -p "${PROJECT_ROOT}/.var"
   output="${PROJECT_ROOT}/.var/install-verify.$$.log"
+  # v2 writes plugin logs to <project>/log (standalone stderr is /dev/null), so
+  # the assertion also accepts a project log line produced by this run. The
+  # marker keeps an older line from satisfying it.
+  marker="${PROJECT_ROOT}/.var/install-verify-start.$$"
   CLEANUP_TARGET="${output}"
-  if ! ( cd "${PROJECT_ROOT}" && timeout 90 opencode run verify \
-    --model nonexistent/nonexistent --print-logs --log-level DEBUG ) >"${output}" 2>&1; then
-    log INFO "${stage}" "run 返回非 0（模型名不存在属预期），继续检查日志"
+  : >"${marker}"
+  # v2.3.x rejects the v1 spelling `--log-level DEBUG`, and its `run` path talks
+  # to a background service whose stderr --print-logs does not reach; the same
+  # `debug agents --standalone` invocation the regression script uses loads the
+  # plugin and prints host logs. v1 keeps its original command.
+  version="$(opencode --version 2>/dev/null | head -1 || true)"
+  major="$(printf '%s\n' "${version}" |
+    awk 'match($0, /[0-9]+/) { print substr($0, RSTART, RLENGTH); exit }')"
+  local -a cmd
+  if [[ -n "${major}" ]] && (( major >= 2 )); then
+    cmd=(opencode debug agents --standalone --print-logs --log-level debug)
+  else
+    cmd=(opencode run verify --model nonexistent/nonexistent --print-logs --log-level DEBUG)
+  fi
+  log INFO "${stage}" "宿主版本：${version:-<未输出>}"
+  if ! ( cd "${PROJECT_ROOT}" && timeout 90 "${cmd[@]}" ) >"${output}" 2>&1; then
+    log INFO "${stage}" "宿主命令返回非 0（模型名不存在属预期），继续检查日志"
   fi
   if [[ "$(<"${output}")" == *"failed to load plugin"* ]]; then
-    rm -f "${output}"
+    rm -f "${output}" "${marker}"
     CLEANUP_TARGET=""
     die "${stage}" "宿主加载插件失败（日志出现 failed to load plugin）"
   fi
-  if [[ "$(<"${output}")" != *"issue-trigger loaded"* ]]; then
-    rm -f "${output}"
-    CLEANUP_TARGET=""
-    die "${stage}" "日志中未出现 issue-trigger loaded"
+  loaded=0
+  if [[ "$(<"${output}")" == *"issue-trigger loaded"* ]]; then
+    loaded=1
   fi
-  rm -f "${output}"
+  if [ "${loaded}" -eq 0 ]; then
+    for log_file in "${PROJECT_ROOT}/log/issue-trigger."*.log; do
+      [ -f "${log_file}" ] || continue
+      [ "${log_file}" -nt "${marker}" ] || continue
+      if rg -q 'issue-trigger loaded' "${log_file}"; then
+        loaded=1
+        break
+      fi
+    done
+  fi
+  rm -f "${output}" "${marker}"
   CLEANUP_TARGET=""
+  if [ "${loaded}" -ne 1 ]; then
+    die "${stage}" "日志中未出现 issue-trigger loaded（宿主 stderr 与 ${PROJECT_ROOT}/log 均无）"
+  fi
   log PASS "${stage}" "宿主加载成功且无 LoadError"
 }
 
