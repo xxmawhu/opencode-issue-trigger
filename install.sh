@@ -348,9 +348,12 @@ verify_load() {
   # v2 writes plugin logs to <project>/log (standalone stderr is /dev/null), so
   # the assertion also accepts a project log line produced by this run. The
   # marker keeps an older line from satisfying it.
+  # Marker is one second in the past: coarse-mtime filesystems would report a
+  # same-second log as not newer, turning the freshness check into a false miss.
   marker="${PROJECT_ROOT}/.var/install-verify-start.$$"
   CLEANUP_TARGET="${output}"
   : >"${marker}"
+  touch -d '1 second ago' "${marker}"
   # v2.3.x rejects the v1 spelling `--log-level DEBUG`, and its `run` path talks
   # to a background service whose stderr --print-logs does not reach; the same
   # `debug agents --standalone` invocation the regression script uses loads the
