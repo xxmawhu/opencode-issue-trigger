@@ -11,9 +11,11 @@
 #      never injected it inside the window
 #   3. dispatch health: probe timeouts and fail-closed skips in the newest
 #      scan_issue hourly log
-#   4. runtime drift: scan_issue process start time vs published binary mtime,
-#      plus [SELF-CHECK] log evidence, so a published-but-not-running build is
-#      visible every day instead of only when someone notices stale behavior
+#   4. runtime drift: whether the running scan_issue image covers the published
+#      binary, decided by the self-check's own "matches published build" line for
+#      the current publish (the self-check swaps images in place, so the process
+#      start time alone cannot prove staleness); start time remains the fallback
+#      for builds that predate the self-check mechanism
 #   5. the precondition the watcher itself rests on: an opencode config that
 #      installs this plugin must disable the host's idle location eviction,
 #      because an evicted location unloads the plugin silently
@@ -47,9 +49,9 @@ SCAN_RESTART_LOG_DIRS=(
   "/mnt/beegfs_data/usr/maxx/regular_task/scan_issue/log"
   "/mnt/beegfs_data/usr/maxx/dev/agents-tools/scan-issue/regular_task/scan_issue/log"
 )
-# A published build older than the process start is normal; the reverse means the
-# running image predates what is on disk. Ignore a 30-minute window so a build
-# that was just published, and is about to be picked up, is not reported.
+# A published build newer than the process start is the fallback drift signal for
+# builds without the self-check mechanism. A 30-minute window keeps a build that
+# was just published, and is about to be picked up, out of the report.
 SCAN_DRIFT_GRACE=1800
 SCAN_DRIFT_REPORT_DAYS=7
 LOG_DIR="${ROOT}/log"
@@ -321,6 +323,50 @@ newest_complete_scan_log() {
   printf '%s' "${last}"
 }
 
+# True when a self-check wrote "running image matches published build" with the
+# current published size at a timestamp at or after the current publish. That line
+# is emitted on startup and after every completed image swap, so it is the only
+# cross-user proof that the running image covers exactly this publish: /proc/<pid>/exe
+# is unreadable for another user's process, and the self-check swaps the image in
+# place (same pid, same start time), which makes the start-time heuristic stale
+# forever once a newer build is published.
+has_running_image_match() {
+  local pub_mtime="$1" pub_size="$2" f line ts ts_epoch newest=0
+  ((pub_size > 0)) || return 1
+  # 终止性：外层输入是 scan_logs_by_mtime 的有限文件列表，内层是单个有限文件；
+  # 两者每轮各消费一行，故循环必然结束。
+  while IFS= read -r f; do
+    [[ -f "${f}" ]] || continue
+    # A match line cannot live in a log that stopped before the publish. The
+    # one-hour slack covers the hour-bucket boundary between the two files.
+    (( $(stat -c %Y "${f}" 2>/dev/null || echo 0) + 3600 < pub_mtime )) && continue
+    while IFS= read -r line; do
+      case "${line}" in
+      *'running image matches published build'*"len=${pub_size},"*) ;;
+      *) continue ;;
+      esac
+      ts="${line#\[}"
+      ts="${ts%%\]*}"
+      ts_epoch="$(date -d "${ts}" +%s 2>/dev/null || echo 0)"
+      ((ts_epoch > newest)) && newest=${ts_epoch}
+    done <"${f}"
+  done < <(scan_logs_by_mtime)
+  ((newest >= pub_mtime))
+}
+
+# Any self-check line in the last day: a live self-check build keeps emitting one
+# at startup and on every drift/swap, so presence is evidence the running binary
+# carries the mechanism even between publishes (steady state logs nothing).
+has_recent_selfcheck() {
+  local f
+  # 终止性：输入是 fdfind 的有限文件列表，每轮消费一行，命中即返回。
+  while IFS= read -r f; do
+    [[ -f "${f}" ]] || continue
+    rg -q -e '\[SELF-CHECK\]' "${f}" 2>/dev/null && return 0
+  done < <(fdfind --type f --glob 'scan_issue*.log' --changed-within 1d "${SCAN_LOG_DIR}" 2>/dev/null)
+  return 1
+}
+
 # Probe timeouts are the failure the published fix classifies; new-classification
 # strings prove the new build is the one writing them.
 scan_log_metric() {
@@ -393,19 +439,25 @@ read_restart_state() {
 }
 
 check_scan_runtime() {
-  local pub_mtime now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
+  local pub_mtime pub_size now pid etimes start_epoch drift=0 selfcheck=0 start_iso pub_iso
   local recorded
   local latest exit124 newclass baseline_new act_epoch latest_hour act_hour decision restart_state restart_log_mtime
-  local -a logs=()
 
   if [[ ! -f "${SCAN_PUBLISHED}" ]]; then
     printf 'SCANSTOPPED\tstate=published-missing\tpath=%s\n' "${SCAN_PUBLISHED}" >>"${TMP_DIR}/findings.txt"
     return 0
   fi
 
-  pub_mtime="$(stat -c %Y "${SCAN_PUBLISHED}" 2>/dev/null || echo 0)"
+  # SCAN_PUBLISHED is a symlink to a versioned build, so follow it: the link's
+  # own mtime and size describe the link, not the published binary.
+  pub_mtime="$(stat -Lc %Y "${SCAN_PUBLISHED}" 2>/dev/null || echo 0)"
+  pub_size="$(stat -Lc %s "${SCAN_PUBLISHED}" 2>/dev/null || echo 0)"
   now="$(date +%s)"
-  pid="$(pgrep -f "^${SCAN_PUBLISHED} " 2>/dev/null | head -1)"
+  # The runtime may be started from the release symlink or from the resolved
+  # versioned file under the research tree, so match the executable basename at
+  # the head of the command line instead of pinning one directory. [^/ ]* keeps
+  # helper scripts (…/scan_issue/check_opencode.sh) out of the match.
+  pid="$(pgrep -f -- '^[^ ]*/scan_issue[^/ ]* ' 2>/dev/null | head -1)"
   if [[ -z "${pid}" ]]; then
     printf 'SCANSTOPPED\tstate=no-process\tpublished_mtime=%s\n' \
       "$(date -d "@${pub_mtime}" '+%Y-%m-%dT%H:%M:%S')" >>"${TMP_DIR}/findings.txt"
@@ -415,10 +467,16 @@ check_scan_runtime() {
   etimes="$(ps -o etimes= -p "${pid}" 2>/dev/null | tr -d ' ')"
   [[ "${etimes}" =~ ^[0-9]+$ ]] || etimes=0
   start_epoch=$((now - etimes))
+  # Start-time heuristic: only builds without the self-check mechanism fail here,
+  # because a self-check build swaps its image in place and keeps this timestamp.
   ((pub_mtime - start_epoch > SCAN_DRIFT_GRACE)) && drift=1
-
-  while IFS= read -r f; do logs+=("${f}"); done < <(scan_logs_by_mtime | tail -3)
-  if ((${#logs[@]} > 0)) && rg -q -e '\[SELF-CHECK\]' "${logs[@]}" 2>/dev/null; then
+  # A successful self-check match against the current publish supersedes the
+  # heuristic: the running image is byte-identical by its own report.
+  if ((drift == 1)) && has_running_image_match "${pub_mtime}" "${pub_size}"; then
+    drift=0
+    selfcheck=1
+  fi
+  if ((selfcheck == 0)) && has_recent_selfcheck; then
     selfcheck=1
   fi
 
@@ -525,7 +583,7 @@ write_issue() {
     printf '```\n\n## 证据\n\n'
     printf -- '- 明细日志：%s\n' "${LOG_FILE}"
     printf -- '- 窗口：最近 %s 天事件（%s 起）\n' "${WINDOW_DAYS}" "${CUTOFF}"
-    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；LOCATIONTTL = 已安装本项目插件的 opencode 配置缺少 experimental.%s=false（宿主会静默卸载 location，监听随之消失）；SCANDRIFT = 发布件新于运行镜像且无自检日志；RESTARTSKIP = 漂移且重启通道最后一轮判 SKIP；RESTARTBLOCKED = 发布后重启通道已判 RESTART 但进程仍未切换（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}" "${LOCATION_TTL_KEY}"
+    printf -- '- 判据：dropped > 0 视为提醒丢失；injected = 0 且 nosession >= %s 视为未送达；LOCATIONTTL = 已安装本项目插件的 opencode 配置缺少 experimental.%s=false（宿主会静默卸载 location，监听随之消失）；SCANDRIFT = 发布件新于进程启动且无任何自检证据（自检成功换镜像不改变进程启动时刻，故不以启动时刻单独判定）；RESTARTSKIP = 漂移且重启通道最后一轮判 SKIP；RESTARTBLOCKED = 发布后重启通道已判 RESTART 但进程仍未切换（仅记录，根因在外部项目）\n\n' "${NO_SESSION_ALERT}" "${LOCATION_TTL_KEY}"
     printf '## 处置\n\n按本轮审计结论修复根因，修复后删除/归档本 issue；同日不重复创建。\n'
   } >"${body}"
   log ERROR "findings written to ${body}"
