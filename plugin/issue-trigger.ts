@@ -12,7 +12,6 @@ import { join } from "node:path";
 import {
   createFileSink,
   createGoalResume,
-  createIssueInputHandler,
   createIssueTrigger,
   createLogger,
 } from "../issue-trigger-lib/index.mjs";
@@ -24,7 +23,6 @@ const hosts = new Map();
 
 function createCore({ directory, logger, listSessions, sendPrompt, onInjected }) {
   const issuesDir = join(directory, "issues");
-  const inputHandler = createIssueInputHandler({ issuesDir, logger });
   // Held in an object so a later generation loading the same directory can attach
   // its own hook (the v2 pass owns goal resume; the v1 pass does not).
   const hook = { onInjected };
@@ -36,7 +34,7 @@ function createCore({ directory, logger, listSessions, sendPrompt, onInjected })
     sendPrompt,
     onInjected: (sessionID, path) => hook.onInjected?.(sessionID, path),
   });
-  return { trigger, inputHandler, hook };
+  return { trigger, hook };
 }
 
 function acquireHost(config) {
@@ -58,75 +56,6 @@ function releaseHost(directory) {
   if (host.refs > 0) return undefined;
   hosts.delete(directory);
   return host.trigger.stop();
-}
-
-// Feeds the text parts of one user message to the issue command parser. The
-// active agent name is intentionally not used: hosts may run every session
-// under the same agent (for example `ulw-pm`), so it cannot distinguish user
-// input from plugin injections. Only synthetic parts and our own reminder
-// prefixes are filtered.
-function handleParts({ inputHandler, logger, parts, messageID }) {
-  try {
-    for (const part of Array.isArray(parts) ? parts : []) {
-      if (part?.type !== "text" || typeof part.text !== "string") continue;
-      const result = inputHandler.handle({
-        text: part.text,
-        messageID,
-        synthetic: part.synthetic === true,
-      });
-      if (result.created) break;
-    }
-  } catch (error) {
-    // A parsing failure must never break the user's message.
-    logger.error("failed to handle user input", { error: String(error) });
-  }
-}
-
-function messageParts(message, info) {
-  if (Array.isArray(message?.parts)) return message.parts;
-  if (Array.isArray(message?.content)) return message.content;
-  if (Array.isArray(info?.parts)) return info.parts;
-  return [];
-}
-
-// opencode 2.x has no chat.message hook. The `context` session hook receives
-// the message list before each model call, which is the only place a user
-// prompt becomes visible to a plugin, so the issue command is admitted there.
-function userTexts(message) {
-  const info = message?.info ?? message;
-  if (info?.role !== "user") return undefined;
-  const messageID = info?.id ?? message?.id ?? info?.messageID;
-  const texts = [];
-  for (const part of messageParts(message, info)) {
-    if (part?.synthetic === true) continue;
-    if (part?.type !== "text" || typeof part.text !== "string") continue;
-    texts.push(part.text);
-  }
-  if (typeof info?.text === "string") texts.push(info.text);
-  return { messageID, texts };
-}
-
-function createContextHook(inputHandler, logger) {
-  return (event) => {
-    try {
-      const messages = Array.isArray(event?.messages) ? event.messages : [];
-      for (const message of messages) {
-        const entry = userTexts(message);
-        if (!entry) continue;
-        for (const text of entry.texts) {
-          const result = inputHandler.handle({
-            text,
-            messageID: entry.messageID,
-            synthetic: false,
-          });
-          if (result.created) break;
-        }
-      }
-    } catch (error) {
-      logger.error("failed to inspect session messages", { error: String(error) });
-    }
-    return event;
-  };
 }
 
 // Generation is decided by the registration surface actually present in the
@@ -199,16 +128,6 @@ async function server(input) {
   logger.info("issue-trigger loaded", { issuesDir: host.trigger.issuesDir });
 
   return {
-    // v1 hook for user input. Read only the parts the user typed; host
-    // synthesized parts are ignored.
-    "chat.message": async (input, output) => {
-      handleParts({
-        inputHandler: host.inputHandler,
-        logger,
-        parts: output?.parts,
-        messageID: input?.messageID,
-      });
-    },
     event: async ({ event }) => {
       host.trigger.noteEvent(event);
     },
@@ -283,25 +202,8 @@ async function setup(ctx) {
     })();
   }
 
-  let contextHook;
-  if (typeof ctx?.session?.hook === "function") {
-    try {
-      contextHook = await ctx.session.hook("context", createContextHook(host.inputHandler, logger));
-    } catch (error) {
-      logger.error("failed to register session context hook", { error: String(error) });
-    }
-  } else {
-    // [log-review] 预期内：宿主未暴露 session.hook；降级原因：监听注入仍可用；影响范围：用户输入创建 issue 不可用
-    logger.warn("host exposes no session.hook; user input issue creation disabled");
-  }
-
   return async () => {
     controller.abort();
-    try {
-      contextHook?.dispose?.();
-    } catch {
-      // Ignore dispose failures during shutdown.
-    }
     await releaseHost(directory);
   };
 }

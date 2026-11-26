@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Reproducible regression chain for the dual-generation plugin install:
-#   install -> start -> assert no LoadError -> drop an issue -> assert injection
-#   -> restart -> assert the same issue is injected once per process
+#   install -> assert no user-input writer -> start -> assert no LoadError
+#   -> drop an issue -> assert injection -> restart -> assert the same issue is
+#   injected once per process
 # Runs in an isolated HOME, so it never touches the real opencode config.
 #
 # Environment overrides:
@@ -75,6 +76,26 @@ run_install() {
   pass install "安装完成且入口与仓库一致（mode=${label}）"
 }
 
+# The plugin must stay read-only on issues/. User input used to be materialized
+# as an issue file; `opencode run` prefixes every prompt with `issue `, so that
+# path produced a pointer file per dispatch and re-dispatched itself. Assert the
+# installed build has no writer instead of relying on a single behavioural run.
+assert_no_input_writer() {
+  local stage="no-pointer-writer"
+  local lib="${SANDBOX}/home/.config/opencode/issue-trigger-lib"
+  local entry="${SANDBOX}/home/.config/opencode/plugin/issue-trigger.ts"
+  [ ! -e "${lib}/issue-input.mjs" ] || fail "${stage}" "安装目录仍存在 issue-input.mjs"
+  if rg -q 'createIssueInputHandler|"chat\.message"|session\.hook\(' "${entry}"; then
+    fail "${stage}" "入口仍注册用户输入落盘链路"
+  fi
+  # log-file.mjs is the only writer (appendFileSync); a writeFileSync/linkSync
+  # anywhere in the shared library means a file-creating path came back.
+  if rg -q 'writeFileSync|linkSync' "${lib}"; then
+    fail "${stage}" "共享库仍存在写文件调用"
+  fi
+  pass "${stage}" "无用户输入落盘链路、共享库无写文件调用"
+}
+
 # One v1 round: fresh issue file, one headless run, assert single injection.
 v1_round() {
   local round="$1"
@@ -129,7 +150,9 @@ main() {
       fail start "沙箱配置目录未生效：$(printf '%s' "${paths}" | head -4 | tr '\n' ' ')"
   fi
   run_install copy
+  assert_no_input_writer
   run_install link --link
+  assert_no_input_writer
 
   local i
   # Loop bound is the caller-supplied round count; no early exit, so the

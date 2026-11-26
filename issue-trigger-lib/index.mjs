@@ -7,12 +7,3 @@ export { createSessionTracker } from "./session-tracker.mjs";
 export { createLogger } from "./logger.mjs";
 export { createFileSink, formatLine, hourlyLogPath } from "./log-file.mjs";
 export { isIssueFileName } from "./issue-file.mjs";
-export {
-  createIssueInputHandler,
-  parseIssueCommand,
-  matchesIssueCommand,
-  formatTimestamp,
-  ISSUE_COMMAND_PATTERN,
-  INJECTED_PROMPT_PREFIX,
-  INJECTED_PROMPT_PREFIXES,
-} from "./issue-input.mjs";
