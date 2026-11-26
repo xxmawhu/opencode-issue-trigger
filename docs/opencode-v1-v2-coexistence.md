@@ -30,7 +30,7 @@
 - `setup`：`location.directory` 是字符串，且顶层 `session.list`、`session.prompt` 是函数 → 执行 v2 接线；否则返回 `undefined`，不做事。
 - 全程不读版本号：版本是宿主可给可不给的弱信号，注册面有无是强事实。v1 配置回调、未知形态上下文都因缺 v2 注册面自然落入不动作分支。
 
-v2 路径用到的 ctx 接口（`event.subscribe`、`session.list`、`session.prompt`）仍要先判 `typeof === "function"`。
+v2 路径用到的 ctx 接口（`event.subscribe`、`session.hook`、`session.list`、`session.prompt`）仍要先判 `typeof === "function"`。
 
 ## 共享库位置
 

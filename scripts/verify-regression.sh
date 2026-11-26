@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Reproducible regression chain for the dual-generation plugin install:
-#   install -> assert no user-input writer -> start -> assert no LoadError
-#   -> drop an issue -> assert injection -> restart -> assert the same issue is
-#   injected once per process
+#   install -> assert input writer present -> materialize a user `issue` message
+#   -> start -> assert no LoadError -> drop an issue -> assert injection
+#   -> restart -> assert the same issue is injected once per process
 # Runs in an isolated HOME, so it never touches the real opencode config.
 #
 # Environment overrides:
@@ -76,24 +76,47 @@ run_install() {
   pass install "安装完成且入口与仓库一致（mode=${label}）"
 }
 
-# The plugin must stay read-only on issues/. User input used to be materialized
-# as an issue file; `opencode run` prefixes every prompt with `issue `, so that
-# path produced a pointer file per dispatch and re-dispatched itself. Assert the
-# installed build has no writer instead of relying on a single behavioural run.
-assert_no_input_writer() {
-  local stage="no-pointer-writer"
+# The plugin materializes a user message that starts with `issue` as an issue
+# file (2026-11-26 user ruling: this is a feature; the duplicate-file report was
+# about `o.run` prefixing every prompt, not about this capability). Assert the
+# installed build carries the writer chain instead of trusting one behavioural
+# run, so a future removal cannot pass silently.
+assert_input_writer() {
+  local stage="input-writer"
   local lib="${SANDBOX}/home/.config/opencode/issue-trigger-lib"
   local entry="${SANDBOX}/home/.config/opencode/plugin/issue-trigger.ts"
-  [ ! -e "${lib}/issue-input.mjs" ] || fail "${stage}" "安装目录仍存在 issue-input.mjs"
-  if rg -q 'createIssueInputHandler|"chat\.message"|session\.hook\(' "${entry}"; then
-    fail "${stage}" "入口仍注册用户输入落盘链路"
-  fi
-  # log-file.mjs is the only writer (appendFileSync); a writeFileSync/linkSync
-  # anywhere in the shared library means a file-creating path came back.
-  if rg -q 'writeFileSync|linkSync' "${lib}"; then
-    fail "${stage}" "共享库仍存在写文件调用"
-  fi
-  pass "${stage}" "无用户输入落盘链路、共享库无写文件调用"
+  [ -f "${lib}/issue-input.mjs" ] || fail "${stage}" "安装目录缺少 issue-input.mjs"
+  rg -q 'createIssueInputHandler' "${entry}" || fail "${stage}" "入口未接入用户输入处理器"
+  rg -q '"chat\.message"' "${entry}" || fail "${stage}" "入口缺少 v1 chat.message hook"
+  rg -q 'session\.hook\(' "${entry}" || fail "${stage}" "入口缺少 v2 session.hook 注册"
+  # writeFileSync + linkSync 是物化链路的唯一实现：临时件落盘 + 硬链接原子发布。
+  rg -q 'writeFileSync' "${lib}/issue-input.mjs" || fail "${stage}" "issue-input.mjs 不再写临时件"
+  rg -q 'linkSync' "${lib}/issue-input.mjs" || fail "${stage}" "issue-input.mjs 不再硬链接发布"
+  pass "${stage}" "安装目录带物化模块、三条注册链路齐全"
+}
+
+# Behavioural half of the same contract: the v1 host must turn `issue <body>`
+# into a file under issues/. Body stays short so the slug is predictable
+# (slug = first line slice(0, 24), only [A-Za-z0-9_-] kept).
+v1_materialize_round() {
+  local stage="materialize"
+  local output="${SANDBOX}/v1-materialize.log"
+  local body="materialize-probe"
+  rm -f "${SANDBOX}/project/issues/"*.md
+  ( cd "${SANDBOX}/project" && iso HOME="${SANDBOX}/home" timeout 120 "${V1}" run "issue ${body}" \
+    --model nonexistent/nonexistent --print-logs --log-level DEBUG ) >"${output}" 2>&1
+  local created
+  created="$(rg --files --no-ignore -g "*_${body}.md" "${SANDBOX}/project/issues" | head -1)"
+  [[ -n "${created}" ]] || fail "${stage}" "宿主启动后未生成 issue 文件（详见 ${output}）"
+  [[ "$(<"${created}")" == "${body}" ]] ||
+    fail "${stage}" "issue 文件内容不符：$(head -3 "${created}" | tr '\n' ' ')"
+  # 空正文不建文件：命令被识别但不物化。
+  rm -f "${SANDBOX}/project/issues/"*.md
+  ( cd "${SANDBOX}/project" && iso HOME="${SANDBOX}/home" timeout 120 "${V1}" run "issue" \
+    --model nonexistent/nonexistent --print-logs --log-level DEBUG ) >"${SANDBOX}/v1-materialize-empty.log" 2>&1
+  [[ -z "$(rg --files --no-ignore -g '*.md' "${SANDBOX}/project/issues" | head -1)" ]] ||
+    fail "${stage}" "空正文仍生成了 issue 文件"
+  pass "${stage}" "issue <正文> 生成 ${body}.md 且内容一致；空正文不建文件"
 }
 
 # One v1 round: fresh issue file, one headless run, assert single injection.
@@ -121,7 +144,7 @@ v2_round() {
   rm -rf "${plugin_log}"
   ( cd "${SANDBOX}/project" && iso HOME="${SANDBOX}/home" timeout 120 "${V2}" \
     --standalone --print-logs --log-level debug debug agents ) >"${output}" 2>&1
-  local load_fail loaded log_file
+  local load_fail loaded log_file hook_missing hook_error
   load_fail="$(count_matches 'failed to load plugin' "${output}")"
   # v2 has no app.log endpoint and standalone stderr goes to /dev/null, so the
   # plugin owns an hourly log inside the project (issue 891a50f5).
@@ -130,17 +153,23 @@ v2_round() {
   [[ "${load_fail}" -eq 0 ]] || fail v2 "round ${round} LoadError=${load_fail}"
   [[ "${loaded}" -eq 1 ]] || fail v2 "round ${round} 激活次数=${loaded}（应为 1，日志目录 ${plugin_log}）"
   [[ -n "${log_file}" ]] || fail v2 "round ${round} 未生成项目内日志（${plugin_log}）"
-  pass v2 "round ${round} 无 LoadError、单激活、项目日志已写入"
+  # User-input materialization is part of the v2 wiring too: the context hook
+  # must register, and its absence is logged as a warning by the plugin.
+  hook_missing="$(count_matches 'host exposes no session.hook' "${log_file}")"
+  hook_error="$(count_matches 'failed to register session context hook' "${log_file}")"
+  [[ "${hook_missing}" -eq 0 ]] || fail v2 "round ${round} 宿主未暴露 session.hook，物化链路缺失"
+  [[ "${hook_error}" -eq 0 ]] || fail v2 "round ${round} session.hook 注册失败（详见 ${log_file}）"
+  pass v2 "round ${round} 无 LoadError、单激活、项目日志已写入、session.hook 已注册"
 }
 
 main() {
   [[ -x "${V1}" ]] || fail start "v1 可执行文件不存在: ${V1}"
-  # `debug info` exists only on the 1.x host, so it doubles as a generation
-  # probe. Since 2026-11-18 /usr/local/bin/opencode is 2.x, so refuse to run the
-  # v1 rounds against it instead of silently testing the wrong generation.
-  "${V1}" debug info >/dev/null 2>&1 ||
-    fail start "${V1} 不支持 debug info（疑似 2.x 宿主），请用 OPENCODE_V1 指定 1.x 二进制"
   setup_sandbox
+  # `debug info` exists only on the 1.x host, so it doubles as a generation
+  # probe. Run it in the sandbox HOME: the live database may be a 2.x schema and
+  # make the 1.x binary exit non-zero for reasons unrelated to its generation.
+  iso HOME="${SANDBOX}/home" "${V1}" debug info >/dev/null 2>&1 ||
+    fail start "${V1} 不支持 debug info（疑似 2.x 宿主），请用 OPENCODE_V1 指定 1.x 二进制"
   # Assert the isolation instead of trusting it: a leaked OPENCODE env var makes
   # the CLI use the live workspace's config and database.
   if [[ -n "${V2}" ]]; then
@@ -150,9 +179,10 @@ main() {
       fail start "沙箱配置目录未生效：$(printf '%s' "${paths}" | head -4 | tr '\n' ' ')"
   fi
   run_install copy
-  assert_no_input_writer
+  assert_input_writer
   run_install link --link
-  assert_no_input_writer
+  assert_input_writer
+  v1_materialize_round
 
   local i
   # Loop bound is the caller-supplied round count; no early exit, so the

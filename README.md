@@ -16,13 +16,41 @@
 
 - 无运行时依赖，只用 Node/Bun 内置模块。
 
-## 不写 issues/ 的约定
+## 从用户输入创建 issue
 
-`issues/` 由用户或其他工具写入，插件只读该目录并注入提醒；插件进程不创建、不修改、不删除其中任何文件。
+在会话中发送以 `issue` 开头的消息，插件会把它写成 `issues/` 下的新文件，随后按正常监听链路注入处理提示词。
 
-- 用户输入按普通消息处理：`issue`、`issue:` 等前缀不做特殊解析，也不落盘。
-- 唯一写入口是他人放置的 issue 文件；插件只通过 `fs.watch` 与 30 秒轮询读取。
-- 已删除「从用户输入创建 issue」能力（2026-11-26 用户裁定）。原因：`opencode run` 会对任意 prompt 前置 `issue `，该文本被误判为建 issue 命令，于是每轮派发都在 `issues/` 生成指针件，再被监听链路当成新 issue 派发，形成噪声链。
+```text
+issue 记录：编译时缺少 zstd 头文件
+```
+
+行为约定：
+
+- 以首个非空行判断是否为命令；`issue` 后可跟空格或冒号，正文保留全部行。
+- 宿主把 prompt 作为 JSON 字符串传入时（例如 `opencode run`），外层成对的单/双引号会先剥离再解析。
+- 正文为空时不创建文件，只记录一条 warn 日志。
+- 文件名为 `<YYYYMMDD_HHMMSS>_<slug>.md`：slug 取正文首行前 24 个字符，非 `[A-Za-z0-9_-]` 折叠为 `-`；同秒同名追加 `_2`、`_3`。
+- 先写 `issues/.<name>.md.tmp-<pid>`，再用硬链接原子发布；临时文件不以 `.md` 结尾，监听器不会拾到半成品，同名时追加 `_2` 而不覆盖。
+- `issues/` 不存在时只记录 warn，不自动创建目录。
+- 写入失败只记录 error，不影响用户消息本身。
+- 同一 `messageID` 只处理一次，防止流式重试重复创建。
+
+消息过滤：
+
+- 宿主生成的合成消息（part 带 `synthetic`）不处理。
+- 以注入词 `请分析./issues/`、`请严格遵守./plan/` 开头的文本不处理；注入词本身不以 `issue` 开头，因此不会自激。
+- 不按 agent 名过滤：宿主可能让所有会话都运行在 `ulw-pm` 等非默认 agent 下，此时用户输入与插件注入的 agent 相同，按 agent 过滤会把用户消息一并丢弃。
+
+实现路径：
+
+- v1：宿主调用 `server()`，注册 `chat.message` hook，读取 `output.parts` 中的文本片段。
+- v2：宿主调用 `setup(ctx)`。用户输入没有 `chat.message` 等价 hook，改用 `session.hook("context")` 读取每次模型调用前的消息列表；同一 `messageID` 只处理一次。监听注入链路使用 `ctx.session.list/prompt` 与 `ctx.event.subscribe`。
+- 共享库安装在 `~/.config/opencode/issue-trigger-lib`，不放在 `plugin/` 或 `plugins/` 下：两代宿主都会把这两个目录的子目录当作独立插件加载。
+
+与派发链路的边界：
+
+- 以 `issue ` 开头的任意 prompt 都会物化，这是设计行为。`o.run` 会对任意 prompt 前置 `issue `，因此经 `o.run` 派发的消息同样会生成 issue 文件。
+- 重复文件的判定与修复属于派发侧（`opencode_cpp` 的 `do_run` 前置逻辑与 `create_issue_file`），本插件不按调用方特征过滤。
 
 ## 单入口双导出
 
@@ -33,10 +61,10 @@
 
 约束与已验证事实：
 
-- 两套 hook 不互转：v1 用返回的 hook 表（`event`/`dispose`），v2 用 `ctx.event.subscribe` 订阅事件流；业务核心共用，注册层各自适配。
+- 两套 hook 不互转：v1 用返回的 hook 表（`chat.message`/`event`/`dispose`），v2 用 `ctx.session.hook` / `ctx.event.subscribe` 注册；业务核心共用，注册层各自适配。
 - 只安装一份到 `~/.config/opencode/plugin/issue-trigger.ts`，不同时写入 `plugins/`。
 - 共享库安装在 `~/.config/opencode/issue-trigger-lib`，不放在 `plugin/` 或 `plugins/` 下：两代宿主都会把这两个目录的子目录当作独立插件加载。
-- 已实测版本：opencode 1.19.5、opencode 1.18.14、opencode 2.2.5。对象入口的官方支持下限为 1.18.29，更老的 v1 宿主未验证。
+- 已实测版本：opencode 1.19.5、opencode 1.18.14、opencode 2.2.5、opencode 2.3.2。对象入口的官方支持下限为 1.18.29，更老的 v1 宿主未验证。
 - 不提供 `tui` 字段：v1 加载器拒绝 `tui` 与 `server` 共存。
 - 代际判别只看注册面，不读版本号：`server` 要求 `directory|worktree` + `client.session`；`setup` 要求 `location.directory` + 顶层 `session.list/prompt`。缺注册面的上下文（如 v1 的配置回调）直接不动作，v1 会话由 `server` 承担。
 - 同一目录按引用计数只保留一个 watcher；即使较新 v1 宿主同时运行 v1/v2 两套 pass，也不会重复注入。
